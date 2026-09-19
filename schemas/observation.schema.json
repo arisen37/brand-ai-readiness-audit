@@ -10,6 +10,8 @@
     "capabilities": { "type": "object", "description": "renderer, search availability" },
     "archetype": { "type": "string" },
     "template_clusters": { "type": "array" },
+    "link_graph": { "type": "object", "description": "discovered target URL to source-page URLs" },
+    "audit_context": { "type": "object", "description": "collection scope, coverage, and budget for no-recrawl finalization" },
     "observations": {
       "type": "array",
       "items": {

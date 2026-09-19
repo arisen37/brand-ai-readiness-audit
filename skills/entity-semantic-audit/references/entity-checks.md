@@ -147,10 +147,10 @@ name.
   generic"; requires **all** distinguishers absent, not merely one — a site that
   states its type but not its location is not flagged here (that's a narrower
   problem than this check's severity implies).
-- **False-negative risks:** entirely dependent on `CORROBORATION` having run,
-  which requires outbound search availability — `PROJECT_CONTEXT.md` OQ-3 is
-  still open, so this check is a permanent, honestly-declared coverage gap on any
-  audit run without that capability, never a silent pass.
+- **False-negative risks:** entirely dependent on the invoking agent completing
+  the issued collision request and inspecting suitable source pages. A run
+  without agent web-search capability records an honest coverage gap, never a
+  silent pass.
 - **Severity:** medium base; high when a competing match's `category` equals this
   entity's own determined type (an adjacent-category collision, the kind most
   likely to actually confuse a citation).

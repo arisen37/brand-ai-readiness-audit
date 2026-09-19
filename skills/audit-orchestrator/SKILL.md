@@ -2,7 +2,7 @@
 name: audit-orchestrator
 description: Entrypoint for the brand-ai-readiness-audit marketplace. Takes a URL, establishes audit scope and budget, drives a single site-observation pass, invokes the four detector skills and the scoring skill, validates that every finding's evidence resolves to a real observation, enforces the report schema, and emits one audit report of findings plus prioritized suggested actions. Use when asked to audit a website for AI discoverability (whether AI assistants can reach, read, extract, trust and cite it) or on-site engagement (whether visitors arriving from AI answers can orient, get their answer, and continue). Read-only; never modifies the audited site.
 license: MIT
-allowed-tools: Bash Read Write
+allowed-tools: Bash Read Write WebSearch WebFetch
 ---
 
 # Audit Orchestrator (entrypoint)
@@ -17,7 +17,7 @@ should be called directly. It composes the others; they are not standalone entry
 
 Read [shared runtime and safety requirements](../../references/skill-runtime.md)
 before execution. Keep the full marketplace and shared library together. Commands
-below run from this skill directory; use absolute input/output paths when needed.
+below run from the marketplace root; use absolute input/output paths when needed.
 Only the orchestrator collects remotely; other skills read local evidence. Do not
 repeat stages already run by the orchestrator. Local `--out` files may be overwritten.
 
@@ -25,8 +25,10 @@ repeat stages already run by the orchestrator. Local `--out` files may be overwr
 
 - `url` (required)
 - Optional CLI `--max-pages N`, `--out-dir DIR`, and `--save-evidence`.
-- The Python API also accepts `options.budget`. The CLI has no render/search toggle;
-  rendering is capability-detected and external corroboration is not integrated.
+- The Python API also accepts `options.budget`. Rendering is capability-detected.
+- External verification uses the invoking agent's web-search and page-reading tools
+  through [references/agent-search-handoff.md](references/agent-search-handoff.md).
+  It requires no provider API key inside this package.
 
 ## Responsibility
 
@@ -41,22 +43,25 @@ validation, schema enforcement, proactive layer, emission.
 
 ## Procedure
 
-Run `python scripts/run_audit.py <url> [--out-dir DIR] [--max-pages N]` once.
-The executable performs the stages below; do not manually repeat its requests.
+Follow [the agent-search handoff](references/agent-search-handoff.md). Preparation
+performs the remote collection exactly once; finalization reads saved evidence.
 
 1. Resolve target; record requested vs audited host if redirected.
-2. Detect runtime capabilities (renderer, outbound search). Record in the capability matrix.
+2. Detect runtime capabilities (renderer and invoking-agent search). Record them in the capability matrix.
 3. Fetch robots before pages. Check each target path, including allowed deep exceptions;
    unreachable policy or excluded paths produce partial coverage, not permission to bypass.
 4. Drive [../../lib/site_observer](../../lib/site_observer) for exactly one collection pass into an immutable store.
-5. Invoke `crawl-render-audit`, `entity-semantic-audit`, `trust-freshness-audit`,
+5. Emit at most three verification requests. Use available web-search tools, inspect
+   independent source pages, and save cited results using the supplied template.
+6. Validate and import only results tied to this audit and its issued request IDs.
+7. Invoke `crawl-render-audit`, `entity-semantic-audit`, `trust-freshness-audit`,
    `engagement-audit`. Each returns unscored findings.
-6. Invoke `evidence-prioritization` over the pooled findings.
-7. Bind `observation_ids` against the store. Materialize IDs from known source
+8. Invoke `evidence-prioritization` over the pooled findings.
+9. Bind `observation_ids` against the store. Materialize IDs from known source
    observations for absence findings. Drop unresolvable evidence anchors.
-8. Generate proactive opportunities from gaps, not defects.
-9. Validate against [../../schemas/report.schema.json](../../schemas/report.schema.json) and emit `report.json` and `report.md`.
-10. Inspect `run.schema_valid`, `run.skill_failures` and coverage. Exit zero alone
+10. Generate proactive opportunities from gaps, not defects.
+11. Validate against [../../schemas/report.schema.json](../../schemas/report.schema.json) and emit `report.json` and `report.md`.
+12. Inspect `run.schema_valid`, `run.skill_failures` and coverage. Exit zero alone
     does not prove a complete or valid audit; report unexpected emission failures.
 
 ## Evidence rules
@@ -67,8 +72,9 @@ require known source URLs. Resolution establishes provenance, not interpretation
 ## Outputs
 
 `report.json` and `report.md` in the selected output directory; `--save-evidence`
-also writes `observations.json`. Partial runs carry coverage entries. Unexpected
-lifecycle failures and the 280-second CLI worker deadline produce incomplete reports.
+also writes `observations.json`. Partial runs carry coverage entries for unexpected
+lifecycle failures. Budgeted audit work stops at 250 seconds by default, reserving
+30 seconds inside the 280-second CLI worker deadline to compose and write a partial report.
 Filesystem errors or missing dependencies may still prevent emission. Never describe
 an incomplete run or zero observed pages as a clean audit.
 
@@ -76,19 +82,21 @@ an incomplete run or zero observed pages as a clean audit.
 
 | Script | Role | CLI |
 |---|---|---|
-| [scripts/run_audit.py](scripts/run_audit.py) | The entrypoint. `run_audit(url, options)` drives the full lifecycle; `main()` is the CLI wrapper that writes `report.json`/`report.md`. | `python scripts/run_audit.py <url> [--out-dir DIR] [--max-pages N]` |
+| [scripts/run_audit.py](scripts/run_audit.py) | Prepares bounded agent-search requests and finalizes supplied results without recrawling. | `python skills/audit-orchestrator/scripts/run_audit.py <url> --out-dir DIR --prepare-agent-search`; then `python skills/audit-orchestrator/scripts/run_audit.py --out-dir DIR --finalize-agent-search DIR/verification_results.json` |
+| [scripts/agent_search.py](scripts/agent_search.py) | Builds and validates the provider-neutral search handoff; performs no network requests. | library only |
 | [scripts/validate_report.py](scripts/validate_report.py) | Evidence-binding CLI (`bind_evidence`); `validate_final_report(report)` is a Python API, not the CLI. | `python scripts/validate_report.py --findings <path> --store <path> [--out <path>]` |
 | [scripts/proactive.py](scripts/proactive.py) | Generates `proactive_opportunities[]` from gaps per [references/proactive-layer.md](references/proactive-layer.md). | (library only, no CLI) |
 | [scripts/render_report.py](scripts/render_report.py) | Renders `report.json` to `report.md`. | `python scripts/render_report.py --report <path> [--out <path>]` |
 
 Collection itself lives in [../../lib/site_observer/](../../lib/site_observer/) (`collect.py`
 drives `crawl.py`, `render.py`, `classify.py`, `probe.py`), not in this skill's
-own `scripts/` — see [project context](../../PROJECT_CONTEXT.md) decision D-6.
+own `scripts/` — see the package's single-collection contract.
 
 ## References
 
 [references/orchestration-rules.md](references/orchestration-rules.md), [references/coverage-policy.md](references/coverage-policy.md),
-[references/degraded-mode.md](references/degraded-mode.md), [references/proactive-layer.md](references/proactive-layer.md)
+[references/degraded-mode.md](references/degraded-mode.md), [references/proactive-layer.md](references/proactive-layer.md),
+and [references/agent-search-handoff.md](references/agent-search-handoff.md)
 
 ## Dependencies
 

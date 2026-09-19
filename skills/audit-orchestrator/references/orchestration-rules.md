@@ -13,13 +13,15 @@
 | Stage | Limit |
 |---|---|
 | Robots preflight | 10 seconds |
-| Sitemap and raw crawl | 90 seconds; 3 sitemaps; 180 sitemap URLs; 30 fetched pages; sequential |
+| Sitemap and raw crawl | 90 seconds; 3 sitemaps; 180 sitemap URLs; 30 fetched pages; up to 4 concurrent page fetches |
 | Render sample | 90 seconds; at most 8 pages; 15 seconds per navigation |
-| Entire collection budget | 270 seconds shared across stages |
-| CLI worker | 280 seconds hard process deadline, plus bounded teardown and report writing |
+| Agent web-search corroboration | at most 3 entity/claim requests and 5 inspected sources per request; duplicate claim queries share one request |
+| Entire audit work budget | 250 seconds shared across budgeted stages |
+| CLI worker | 280 seconds default hard process deadline, overrideable with `--deadline-s`; the 30-second default margin is reserved for composition, validation, serialization, and report writing |
 
-The shared request policy also caps requests at 200 and stops on 429/503. No retries
-or model/search calls are issued. Detector CPU is covered by the CLI worker deadline;
+The shared site-request policy also caps requests at 200 and stops on 429/503. Site
+requests are not retried. Agent web search occurs between preparation and finalization;
+finalization validates cited results and never recrawls. Detector CPU is covered by the CLI worker deadline;
 the library API has cooperative collection limits and requires caller-side process
 isolation for a hard CPU deadline. Stage allowances are ceilings, not additive runtime
 promises. A deadline report is incomplete, not proof of a successful typical-site audit.

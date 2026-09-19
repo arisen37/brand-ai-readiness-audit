@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 MARKETPLACE_ROOT = SCRIPTS_DIR.parents[2]
@@ -27,6 +29,28 @@ if str(MARKETPLACE_ROOT) not in sys.path:
     sys.path.insert(0, str(MARKETPLACE_ROOT))
 
 from lib.common.schema import validate_report as validate_report_schema  # noqa: E402
+from lib.common.url_normalize import normalize_url_for_evidence  # noqa: E402
+
+LOGGER = logging.getLogger(__name__)
+OBSERVATION_ID_RE = re.compile(r"\bOBS-[A-Z]+(?:-[A-Z]+)*-[a-f0-9]{16,40}\b")
+
+
+def _evidence_texts(finding: Dict[str, Any]) -> Iterable[str]:
+    for key in ("evidence", "observed_signal"):
+        value = finding.get(key)
+        if isinstance(value, str):
+            yield value
+
+
+def _ids_referenced_in_evidence(finding: Dict[str, Any]) -> List[str]:
+    seen = set()
+    ids = []
+    for text in _evidence_texts(finding):
+        for observation_id in OBSERVATION_ID_RE.findall(text):
+            if observation_id not in seen:
+                seen.add(observation_id)
+                ids.append(observation_id)
+    return ids
 
 
 def bind_evidence(findings: List[Dict[str, Any]], store: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -48,14 +72,20 @@ def bind_evidence(findings: List[Dict[str, Any]], store: Dict[str, Any]) -> Tupl
        still refuses a finding that points to nothing real at all.
     A finding with neither a resolvable observation_id nor a known
     source_url is dropped as unsupported."""
-    known_ids = {obs.get("id") for obs in store.get("observations", []) if obs.get("id")}
-    known_urls = {obs.get("source_url") for obs in store.get("observations", []) if obs.get("source_url")}
+    observations = store.get("observations", []) or []
+    known_ids = {obs.get("id") for obs in observations if obs.get("id")}
+    observations_by_normalized_url: Dict[str, List[Dict[str, Any]]] = {}
+    for obs in observations:
+        source_url = obs.get("source_url")
+        if source_url:
+            observations_by_normalized_url.setdefault(normalize_url_for_evidence(source_url), []).append(obs)
     kept: List[Dict[str, Any]] = []
     dropped: List[Dict[str, Any]] = []
 
     for finding in findings:
         cited_ids = finding.get("observation_ids") or []
         cited_urls = finding.get("source_urls") or []
+        evidence_ids = _ids_referenced_in_evidence(finding)
 
         if cited_ids:
             unresolved = [oid for oid in cited_ids if oid not in known_ids]
@@ -71,18 +101,54 @@ def bind_evidence(findings: List[Dict[str, Any]], store: Dict[str, Any]) -> Tupl
             kept.append(finding)
             continue
 
-        # No observation_ids cited: fall back to source_urls resolving
-        # against real, fetched pages (see docstring, case 2).
-        if cited_urls and all(url in known_urls for url in cited_urls):
-            # Materialize the page anchors so exported reports are replayable,
-            # including absence findings. IDs refer to actual observed pages,
-            # not fabricated positive evidence of absence.
-            finding["observation_ids"] = sorted({obs["id"] for obs in store.get("observations", [])
-                                                 if obs.get("source_url") in cited_urls and obs.get("id")})
+        if evidence_ids:
+            unresolved = [oid for oid in evidence_ids if oid not in known_ids]
+            if unresolved:
+                dropped.append(
+                    {
+                        "finding_id": finding.get("id"),
+                        "check_id": finding.get("check_id"),
+                        "reason": f"unresolved observation_ids referenced in evidence: {sorted(unresolved)}",
+                    }
+                )
+                continue
+            finding["observation_ids"] = sorted(evidence_ids)
             kept.append(finding)
             continue
 
-        unresolved_urls = [url for url in cited_urls if url not in known_urls]
+        # No observation_ids cited: fall back to source_urls resolving
+        # against real, fetched pages (see docstring, case 2).
+        if cited_urls and all(normalize_url_for_evidence(url) in observations_by_normalized_url for url in cited_urls):
+            # Materialize the page anchors so exported reports are replayable,
+            # including absence findings. IDs refer to actual observed pages,
+            # not fabricated positive evidence of absence.
+            materialized_ids = sorted(
+                {
+                    obs["id"]
+                    for url in cited_urls
+                    for obs in observations_by_normalized_url.get(normalize_url_for_evidence(url), [])
+                    if obs.get("id")
+                }
+            )
+            if materialized_ids:
+                finding["observation_ids"] = materialized_ids
+                kept.append(finding)
+                continue
+            LOGGER.warning(
+                "Evidence binding resolved source_urls for finding %s/%s but produced no observation_ids",
+                finding.get("id"),
+                finding.get("check_id"),
+            )
+            dropped.append(
+                {
+                    "finding_id": finding.get("id"),
+                    "check_id": finding.get("check_id"),
+                    "reason": "resolved source_urls produced no observation_ids",
+                }
+            )
+            continue
+
+        unresolved_urls = [url for url in cited_urls if normalize_url_for_evidence(url) not in observations_by_normalized_url]
         reason = (
             f"unresolved source_urls: {sorted(unresolved_urls)}"
             if unresolved_urls

@@ -24,8 +24,17 @@ from _trust_util import is_corroboration_worthy, source_matches_entity
 from lib.common.observations import make_observation
 
 
-def build_corroboration_query(claim: Dict[str, Any]) -> str:
-    return claim.get("text", "").strip()
+def build_corroboration_query(
+    claim: Dict[str, Any], entity_profile: Optional[Dict[str, Any]] = None
+) -> str:
+    claim_text = claim.get("text", "").strip()
+    canonical = (
+        ((entity_profile or {}).get("fields", {}).get("canonical_name") or {}).get("value")
+        or ""
+    ).strip()
+    if canonical and canonical.lower() not in claim_text.lower():
+        return f'"{canonical}" "{claim_text}"'
+    return claim_text
 
 
 def record_corroboration(
@@ -43,7 +52,7 @@ def record_corroboration(
     `performed: false`; conflating the two is exactly the dishonesty
     `corroboration-honesty.md` rule 4 exists to prevent.
     """
-    query = build_corroboration_query(claim)
+    query = build_corroboration_query(claim, entity_profile)
 
     if search_results is None:
         value: Dict[str, Any] = {

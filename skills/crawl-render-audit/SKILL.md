@@ -85,15 +85,7 @@ never per URL — `affected` carries `{count, sample_urls, total_in_scope}`.
 ## Dependencies
 
 - [../../lib/](../../lib/) — shared instrumentation. This skill reads the observation
-  store; it never fetches. See [project context](../../PROJECT_CONTEXT.md) decision D-6.
+  store; it never fetches. See the package's single-collection contract.
 - [../../references/failure-taxonomy.md](../../references/failure-taxonomy.md) — check ID registry
-
-## Tests
-
-[../../tests/test_crawl_render_audit.py](../../tests/test_crawl_render_audit.py) — synthetic observation stores,
-no network. Covers each check's fire/suppress pair, evidence-ID binding, report-schema
-conformance, and a clean-site zero-findings regression. Run from the marketplace root:
-`python -m pytest tests/test_crawl_render_audit.py`.
-
 
 Shared output semantics: [finding contract](../../references/finding-contract.md).

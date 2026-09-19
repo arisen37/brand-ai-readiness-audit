@@ -11,7 +11,9 @@ CHALLENGE_DETECTED, FETCH_FAILED, UNAVAILABLE_INSTRUMENT. Collection also record
 NETWORK_POLICY and RENDER_FAILED; orchestration records SKILL_FAILED,
 EVIDENCE_UNRESOLVED and UNAVAILABLE_INSTRUMENT.
 Some taxonomy-level reason codes are reserved and not emitted by every collector.
-Current collection also emits PROBE_LIMITED and SITEMAP_UNAVAILABLE. Unexpected
+Current collection also emits PROBE_LIMITED. Sitemap collection uses FETCH_FAILED
+for retrieval/parsing failures and BUDGET_EXHAUSTED for document, entry, or time
+limits; the detail records the exact sitemap limitation. Unexpected
 lifecycle errors emit AUDIT_FAILED. LANGUAGE_UNSUPPORTED now gates English vocabulary
 rules; it does not disable language-neutral structural checks.
 

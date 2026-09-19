@@ -2,7 +2,7 @@
 name: entity-semantic-audit
 description: Detects entity-identity failures that stop AI systems describing a brand correctly or distinguishing it from similarly named things. Checks whether a canonical name, entity type, primary offering, operating scope and location are stated explicitly in machine-readable text rather than implied; whether naming and descriptions stay consistent across pages; whether machine-readable identity anchors exist; and whether an observed name collision is left unresolved. Applies archetype gating so documentation, institutional, editorial and personal sites are not judged as commercial brands. Use as part of a website AI-readiness audit.
 license: MIT
-allowed-tools: Bash Read
+allowed-tools: Bash Read WebSearch WebFetch
 ---
 
 # Entity / Semantic Audit
@@ -63,10 +63,11 @@ Every consistency finding quotes both conflicting strings with both source URLs.
 A collision may only be asserted if it was actually observed, never inferred from a
 name "sounding generic."
 
-> **Capability note.** D-ENTITY-03 (unresolved name collision) needs an outbound
-> corroboration search, which is not wired into this environment. It is reported as an
-> `UNAVAILABLE_INSTRUMENT` coverage entry rather than evaluated; silence from it is not a
-> pass. The other D-ENTITY checks run from the ordinary collection pass.
+> **Capability note.** D-ENTITY-03 asks the invoking agent to inspect sourced web
+> results only when the site supplies no distinguishing attribute. Self-owned and
+> unsourced candidates are rejected, and a distinct match must use the exact canonical
+> name and state a category. Without agent search, the check remains a
+> `SEARCH_UNAVAILABLE` coverage entry rather than a silent pass.
 
 ## Outputs
 
@@ -74,8 +75,8 @@ Unscored findings built with the common finding contract ([../../lib/common/find
 — `check_id, category, title, severity, confidence, mechanism, impact,
 observed_signal, evidence, observation_ids, source_urls, affected,
 suggested_action`), plus `entity_profile` passed to `engagement-audit`.
-The optional trust corroboration recorder can also consume it; the current trust
-detector and proactive layer do not receive that artifact. A proposed base severity and bound
+The orchestrator's agent-search request builder also consumes it;
+the current trust detector and proactive layer do not receive that artifact directly. A proposed base severity and bound
 evidence only — never a final `id` or final severity.
 
 ## Governing principle
@@ -89,16 +90,8 @@ record exists — before it fires. See [references/fp-guardrails.md](references/
 
 - [../../lib/](../../lib/) — shared instrumentation, including the common finding
   contract ([../../lib/common/findings.py](../../lib/common/findings.py)). This skill reads the observation store; it
-  never fetches. See [project context](../../PROJECT_CONTEXT.md) decision D-6.
+  never fetches. See the package's single-collection contract.
 - [../../references/failure-taxonomy.md](../../references/failure-taxonomy.md) — check ID registry
 - [../../references/archetype-applicability.md](../../references/archetype-applicability.md) — check gating by site archetype
-
-## Tests
-
-[../../tests/test_entity_semantic_audit.py](../../tests/test_entity_semantic_audit.py) — unit tests per check,
-an integration test running `build_entity_profile.py` -> `detect_entity.py`
-end-to-end on synthetic multi-page stores, and regression tests (clean/unambiguous
-site, and archetype-suppressed sites, both yield zero findings). No network. Run
-from the marketplace root: `python -m pytest tests/test_entity_semantic_audit.py`.
 
 Shared output semantics: [finding contract](../../references/finding-contract.md).

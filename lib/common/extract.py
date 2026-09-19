@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import copy
 from collections import Counter
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -84,13 +85,31 @@ def parse_cache(max_chars=1_048_576, max_entries=64):
     Oversized pages are parsed normally without retention. Public helpers return
     independent values; mutating detector parsers keep their own trees.
     """
-    state = {"trees": OrderedDict(), "chars": 0, "max_chars": max_chars, "max_entries": max_entries}
+    state = {
+        "trees": OrderedDict(),
+        "results": {},
+        "chars": 0,
+        "max_chars": max_chars,
+        "max_entries": max_entries,
+    }
     token = _PARSE_CACHE.set(state)
     try:
         yield
     finally:
         state["trees"].clear()
+        state["results"].clear()
         _PARSE_CACHE.reset(token)
+
+
+def _cached_result(name: str, html: str, extra: Any, build):
+    """Cache compact derived values even when a large parse tree is evicted."""
+    state = _PARSE_CACHE.get()
+    if state is None:
+        return build()
+    key = (name, html, extra)
+    if key not in state["results"]:
+        state["results"][key] = build()
+    return copy.deepcopy(state["results"][key])
 
 
 def with_parse_cache(function):
@@ -123,30 +142,32 @@ def _soup(html: str) -> BeautifulSoup:
 
 def extract_metadata(html: str) -> Dict[str, Any]:
     """Extract canonical metadata, title, description and social tags."""
-    soup = _soup(html)
-    title_tag = soup.title.get_text(" ", strip=True) if soup.title else ""
+    def build():
+        soup = _soup(html)
+        title_tag = soup.title.get_text(" ", strip=True) if soup.title else ""
 
-    def get_meta(name: str, attrs: List[str]) -> str:
-        for key in attrs:
-            meta = soup.find("meta", attrs={key: name})
-            if meta and meta.get("content"):
-                return str(meta["content"]).strip()
-        return ""
+        def get_meta(name: str, attrs: List[str]) -> str:
+            for key in attrs:
+                meta = soup.find("meta", attrs={key: name})
+                if meta and meta.get("content"):
+                    return str(meta["content"]).strip()
+            return ""
 
-    description = get_meta("description", ["name", "property"]) or get_meta("og:description", ["property"])
-    canonical = extract_canonical_url(html, "")
-
-    return {
-        "title": title_tag,
-        "description": description,
-        "canonical": canonical,
-        "meta": {
+        description = get_meta("description", ["name", "property"]) or get_meta("og:description", ["property"])
+        canonical = extract_canonical_url(html, "")
+        return {
             "title": title_tag,
             "description": description,
-            "og_title": get_meta("og:title", ["property"]),
-            "og_description": get_meta("og:description", ["property"]),
-        },
-    }
+            "canonical": canonical,
+            "meta": {
+                "title": title_tag,
+                "description": description,
+                "og_title": get_meta("og:title", ["property"]),
+                "og_description": get_meta("og:description", ["property"]),
+            },
+        }
+
+    return _cached_result("metadata", html, None, build)
 
 
 def extract_canonical_url(html: str, base_url: str) -> str:
@@ -251,52 +272,59 @@ def schema_type_matches(value: Any, expected: Any) -> bool:
 
 def extract_jsonld(html: str) -> List[Dict[str, Any]]:
     """Extract semantic nodes from valid JSON-LD script blocks."""
-    soup = _soup(html)
-    items: List[Dict[str, Any]] = []
-    for script in soup.find_all("script"):
-        if not is_jsonld_mime_type(script.get("type")):
-            continue
-        content = script.get_text(strip=True)
-        if not content:
-            continue
-        try:
-            parsed = json.loads(content)
-        except (json.JSONDecodeError, RecursionError):
-            continue
-        items.extend(flatten_jsonld(parsed))
-    return items
+    def build():
+        soup = _soup(html)
+        items: List[Dict[str, Any]] = []
+        for script in soup.find_all("script"):
+            if not is_jsonld_mime_type(script.get("type")):
+                continue
+            content = script.get_text(strip=True)
+            if not content:
+                continue
+            try:
+                parsed = json.loads(content)
+            except (json.JSONDecodeError, RecursionError):
+                continue
+            items.extend(flatten_jsonld(parsed))
+        return items
+
+    return _cached_result("jsonld", html, None, build)
 
 
 def extract_links(html: str, base_url: str = "") -> List[Dict[str, Any]]:
     """Extract unique HTML links with normalized absolute URLs and anchor text."""
-    soup = _soup(html)
-    seen = set()
-    links: List[Dict[str, Any]] = []
-    for anchor in soup.find_all("a", href=True):
-        href = str(anchor["href"]).strip()
-        try:
-            absolute = urljoin(base_url, href) if base_url else href
-            urlparse(absolute)  # validate malformed IPv6 authorities
-        except ValueError:
-            continue
-        if not absolute or absolute in seen:
-            continue
-        seen.add(absolute)
-        unsafe_action = anchor.get("role") == "button" or anchor.has_attr("download") or any(
-            key.endswith("-method") and str(value).upper() not in {"GET", "HEAD"}
-            for key, value in anchor.attrs.items())
-        link = {"href": absolute, "text": anchor.get_text(" ", strip=True), "rel": list(anchor.get("rel", []))}
-        if unsafe_action:
-            link["unsafe_action"] = True
-        links.append(link)
-    return links
+    def build():
+        soup = _soup(html)
+        seen = set()
+        links: List[Dict[str, Any]] = []
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor["href"]).strip()
+            try:
+                absolute = urljoin(base_url, href) if base_url else href
+                urlparse(absolute)  # validate malformed IPv6 authorities
+            except ValueError:
+                continue
+            if not absolute or absolute in seen:
+                continue
+            seen.add(absolute)
+            unsafe_action = anchor.get("role") == "button" or anchor.has_attr("download") or any(
+                key.endswith("-method") and str(value).upper() not in {"GET", "HEAD"}
+                for key, value in anchor.attrs.items())
+            link = {"href": absolute, "text": anchor.get_text(" ", strip=True), "rel": list(anchor.get("rel", []))}
+            if unsafe_action:
+                link["unsafe_action"] = True
+            links.append(link)
+        return links
+
+    return _cached_result("links", html, base_url, build)
 
 
 def extract_text(html: str) -> str:
     """Return readable body text with whitespace normalized."""
-    soup = _soup(html)
-    text = soup.get_text(" ", strip=True)
-    return re.sub(r"\s+", " ", text)
+    return _cached_result(
+        "text", html, None,
+        lambda: re.sub(r"\s+", " ", _soup(html).get_text(" ", strip=True)),
+    )
 
 
 def text_weight(text: str) -> int:

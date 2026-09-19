@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent web-search verification results",
+  "type": "object",
+  "required": ["schema_version", "audit_id", "results"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "audit_id": {"type": "string", "pattern": "^AUDIT-[a-f0-9]{16}$"},
+    "results": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["request_id", "status", "searched_at", "sources"],
+        "properties": {
+          "request_id": {"type": "string", "pattern": "^VERIFY-[a-f0-9]{16}$"},
+          "status": {"enum": ["pending", "completed", "unavailable", "failed"]},
+          "searched_at": {"type": ["string", "null"], "format": "date-time"},
+          "error": {"type": "string"},
+          "sources": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "required": ["url", "title", "supporting_text", "assessment", "entity_match"],
+              "properties": {
+                "url": {"type": "string", "format": "uri", "pattern": "^https?://"},
+                "title": {"type": "string", "pattern": "\\S"},
+                "supporting_text": {"type": "string", "pattern": "\\S"},
+                "assessment": {"enum": ["supports", "contradicts", "mentions", "unrelated", "distinct_entity", "same_entity"]},
+                "entity_match": {"type": "boolean"},
+                "entity_evidence": {"type": "string"},
+                "source_type": {"enum": ["primary", "government", "academic", "news", "registry", "directory", "review", "other"]},
+                "entity_name": {"type": "string"},
+                "entity_category": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

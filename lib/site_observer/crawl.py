@@ -16,12 +16,14 @@ from __future__ import annotations
 import re
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import urlparse, urlunsplit
 
 from lib.common.extract import extract_links
 from lib.common.robots import robots_allows_every_interpretation
 from lib.common.network_policy import unsafe_target
+from lib.common.url_normalize import normalize_url_for_evidence
 
 _NUMERIC_SEGMENT_RE = re.compile(r"^\d+$")
 _HEX_ID_RE = re.compile(r"^[0-9a-f]{8,}$", re.IGNORECASE)
@@ -60,11 +62,11 @@ def canonical_resource_url(url: str) -> str:
     - an empty path is "/".
 
     Deliberately NOT normalized, because each would merge resources that are
-    genuinely allowed to differ: the query string (order and presence are
-    server-defined, and "?page=2" is a different resource), and the trailing
-    slash on a non-index path ("/about" and "/about/" are distinct targets that
-    servers usually resolve with a redirect -- which this crawler already
-    follows, recording the resolved URL).
+    genuinely allowed to differ: content-bearing query parameters (order and
+    presence are server-defined, and "?page=2" is a different resource), and
+    the trailing slash on a non-index path ("/about" and "/about/" are distinct
+    targets that servers usually resolve with a redirect -- which this crawler
+    already follows, recording the resolved URL).
     """
     parsed = urlparse(url)
     scheme = (parsed.scheme or "").lower()
@@ -85,7 +87,7 @@ def canonical_resource_url(url: str) -> str:
     if not path:
         path = "/"
 
-    return urlunsplit((scheme, netloc, path, parsed.query, ""))
+    return normalize_url_for_evidence(urlunsplit((scheme, netloc, path, parsed.query, "")))
 
 
 def template_shape(path: str) -> str:
@@ -111,6 +113,40 @@ def template_shape(path: str) -> str:
     return "/".join(shaped) or "/"
 
 
+def prioritize_seed_urls(origin: str, seed_urls: List[str], limit: int) -> List[str]:
+    """Return a deterministic, representative seed frontier.
+
+    The requested URL always stays first.  The remaining sitemap seeds are
+    split into clean and parameterized URLs, then selected round-robin across
+    template shapes.  This keeps a large family of faceted/query URLs from
+    consuming the bounded crawl before distinct content templates are seen;
+    parameterized URLs remain eligible when capacity is available.
+    """
+    if limit <= 0:
+        return []
+
+    requested = canonical_resource_url(origin)
+    unique = list(dict.fromkeys(canonical_resource_url(url) for url in [origin] + seed_urls))
+    remainder = [url for url in unique if url != requested]
+
+    def round_robin(urls: List[str]) -> List[str]:
+        groups: Dict[str, deque[str]] = {}
+        for url in urls:
+            shape = template_shape(urlparse(url).path)
+            groups.setdefault(shape, deque()).append(url)
+        ordered: List[str] = []
+        group_queues = list(groups.values())
+        while any(group_queues):
+            for group in group_queues:
+                if group:
+                    ordered.append(group.popleft())
+        return ordered
+
+    clean = [url for url in remainder if not urlparse(url).query]
+    parameterized = [url for url in remainder if urlparse(url).query]
+    return ([requested] + round_robin(clean) + round_robin(parameterized))[:limit]
+
+
 def crawl(
     origin: str,
     fetch: Callable[[str], Dict[str, Any]],
@@ -123,6 +159,7 @@ def crawl(
     polite_delay_s: float = 0.0,
     sleep: Callable[[float], None] = time.sleep,
     seed_urls: Optional[List[str]] = None,
+    max_concurrency: int = 1,
 ) -> Dict[str, Any]:
     """Same-host BFS crawl, bounded by `max_pages`, `time_left()` (stage
     budget, polled between fetches) and `can_fetch_more()` (a page-count
@@ -136,43 +173,55 @@ def crawl(
     logic without a real test suite run taking minutes."""
     host = registrable_host(origin)
     max_frontier = max_frontier if max_frontier is not None else max_pages * 6
-    initial = list(
-        dict.fromkeys(canonical_resource_url(url) for url in [origin] + (seed_urls or []))
-    )[:max(1, max_frontier)]
-    queue = deque(initial)
+    initial = prioritize_seed_urls(origin, seed_urls or [], max(1, max_frontier))
+    requested_queue = deque(initial[:1])
+    clean_queue = deque(url for url in initial[1:] if not urlparse(url).query)
+    parameter_queue = deque(url for url in initial[1:] if urlparse(url).query)
     seen: Set[str] = set(initial)
     pages: Dict[str, Dict[str, Any]] = {}
     link_graph: Dict[str, Set[str]] = {}
     skipped_robots: List[str] = []
     skipped_safety: List[str] = []
 
-    while queue and len(pages) < max_pages and time_left() > 0 and can_fetch_more():
-        url = queue.popleft()
-        if unsafe_target(url):
-            skipped_safety.append(url)
-            continue
-        path = urlparse(url).path or "/"
-        if urlparse(url).query:
-            path += "?" + urlparse(url).query
-        if robots is not None and not robots_allows_every_interpretation(robots, path):
-            skipped_robots.append(url)
-            continue
+    concurrency = max(1, int(max_concurrency or 1))
 
-        if pages and polite_delay_s > 0:
-            sleep(polite_delay_s)
+    def frontier_has_urls() -> bool:
+        return bool(requested_queue or clean_queue or parameter_queue)
 
-        result = fetch(url)
+    def pop_frontier() -> str:
+        if requested_queue:
+            return requested_queue.popleft()
+        if clean_queue:
+            return clean_queue.popleft()
+        return parameter_queue.popleft()
+
+    def eligible_next_url() -> Optional[str]:
+        while frontier_has_urls() and len(pages) < max_pages and time_left() > 0 and can_fetch_more():
+            url = pop_frontier()
+            if unsafe_target(url):
+                skipped_safety.append(url)
+                continue
+            path = urlparse(url).path or "/"
+            if urlparse(url).query:
+                path += "?" + urlparse(url).query
+            if robots is not None and not robots_allows_every_interpretation(robots, path):
+                skipped_robots.append(url)
+                continue
+            return url
+        return None
+
+    def ingest_page(url: str, result: Dict[str, Any]) -> None:
         pages[url] = result
         if on_page_fetched:
             on_page_fetched(url, result)
 
         status = result.get("status_code", 200)
         if status is None or not 200 <= status < 300:
-            continue  # Do not explore authentication/error-page links.
+            return  # Do not explore authentication/error-page links.
 
         html = (result or {}).get("html", "")
         if not html:
-            continue
+            return
         for link in extract_links(html, base_url=result.get("final_url") or url):
             href = link["href"]
             if link.get("unsafe_action"):
@@ -185,7 +234,30 @@ def crawl(
             link_graph.setdefault(normalized, set()).add(url)
             if normalized not in seen and len(seen) < max_frontier:
                 seen.add(normalized)
-                queue.append(normalized)
+                if urlparse(normalized).query:
+                    parameter_queue.append(normalized)
+                else:
+                    clean_queue.append(normalized)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        while frontier_has_urls() and len(pages) < max_pages and time_left() > 0 and can_fetch_more():
+            batch = []
+            while (
+                len(batch) < concurrency
+                and len(pages) + len(batch) < max_pages
+                and time_left() > 0
+                and can_fetch_more()
+            ):
+                url = eligible_next_url()
+                if url is None:
+                    break
+                if (pages or batch) and polite_delay_s > 0:
+                    sleep(polite_delay_s)
+                batch.append((url, executor.submit(fetch, url)))
+            if not batch:
+                break
+            for url, future in batch:
+                ingest_page(url, future.result())
 
     clusters: Dict[str, List[str]] = {}
     for url in pages:
@@ -197,7 +269,7 @@ def crawl(
         "clusters": {shape: sorted(urls) for shape, urls in clusters.items()},
         "skipped_robots": sorted(set(skipped_robots)),
         "skipped_safety": sorted(set(skipped_safety)),
-        "frontier_remaining": len(queue),
+        "frontier_remaining": len(requested_queue) + len(clean_queue) + len(parameter_queue),
     }
 
 

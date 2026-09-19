@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent web-search verification requests",
+  "type": "object",
+  "required": ["schema_version", "audit_id", "audited_domain", "generated_at", "limits", "selection", "requests"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "audit_id": {"type": "string", "pattern": "^AUDIT-[a-f0-9]{16}$"},
+    "audited_domain": {"type": "string", "minLength": 1},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "limits": {
+      "type": "object",
+      "required": ["max_queries", "max_sources_per_request"],
+      "properties": {
+        "max_queries": {"type": "integer", "minimum": 0, "maximum": 3},
+        "max_sources_per_request": {"type": "integer", "minimum": 1, "maximum": 5}
+      }
+    },
+    "selection": {"type": "object"},
+    "requests": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "query", "excluded_domain", "canonical_name"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^VERIFY-[a-f0-9]{16}$"},
+          "kind": {"enum": ["claim_corroboration", "entity_collision"]},
+          "query": {"type": "string", "minLength": 1},
+          "excluded_domain": {"type": "string", "minLength": 1},
+          "canonical_name": {"type": "string"},
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "text", "source_url", "observation_id"],
+              "properties": {
+                "id": {"type": "string"}, "text": {"type": "string"},
+                "source_url": {"type": "string", "format": "uri"},
+                "observation_id": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

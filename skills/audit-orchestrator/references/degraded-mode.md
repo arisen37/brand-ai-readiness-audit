@@ -17,6 +17,7 @@ prevent CLI emission.
 | Fewer than three pages | Record INSUFFICIENT_PAGES; individual checks apply their minimum evidence requirements. |
 | Sitemap unavailable | Unknown, not missing; only a fetched 404 proves absence. Unfetched entries never count as dead. |
 | Local probe cannot answer | PROBE_LIMITED; never manufacture negative semantic evidence. |
-| No external search provider | SEARCH_UNAVAILABLE; no corroboration finding. |
+| Invoking-agent search unavailable | SEARCH_UNAVAILABLE; no claim-corroboration finding. |
+| Agent search/page inspection fails or requests remain incomplete | Preserve completed searches; record partial/failed search coverage for the rest. |
 | Non-English page | LANGUAGE_UNSUPPORTED for vocabulary-based checks; structural checks continue. |
 | Stage/global budget exhausted | Partial scope and coverage; CLI worker stops after 280 seconds and emits a deadline report. |

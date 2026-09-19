@@ -75,7 +75,7 @@ to the next substep.
 ## Dependencies
 
 - [../../lib/](../../lib/) — reads store metadata for scope and page importance only.
-  Never fetches, never detects. See [project context](../../PROJECT_CONTEXT.md) decision D-6.
+  Never fetches, never detects. See the package's single-collection contract.
 - [../../references/failure-taxonomy.md](../../references/failure-taxonomy.md) — check ID registry
 
 Shared output semantics: [finding contract](../../references/finding-contract.md).

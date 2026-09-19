@@ -8,12 +8,15 @@ from urllib.parse import quote, urljoin, urlparse
 import requests
 
 from .http_client import AUDIT_USER_AGENT, request_once
+from .network_policy import origin as policy_origin
 
 AUDIT_PRODUCT_TOKEN = "brand-ai-readiness-audit"
 
 # A doubly-decoding origin is already pathological; three rounds bounds the
 # work while covering the encodings a real server plausibly collapses.
 MAX_DECODE_ROUNDS = 3
+MAX_ROBOTS_REDIRECTS = 5
+ROBOTS_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 def parse_robots(raw_text: str) -> dict:
@@ -191,36 +194,109 @@ def is_disallow_all(robots: dict) -> bool:
     )
 
 
-def fetch_robots(base_url: str, timeout: int = 10, policy=None) -> dict:
+def _empty_document() -> dict:
+    return {"groups": [], "sitemap": [], "rules": []}
+
+
+def _robots_error(robots_url: str, failure_kind: str, message: str, *, http_status=None, redirect_chain=None) -> dict:
+    result = {
+        "url": robots_url,
+        "status": "error",
+        "failure_kind": failure_kind,
+        "error": message,
+        "allow_all": False,
+        "document": _empty_document(),
+    }
+    if http_status is not None:
+        result["http_status"] = http_status
+    if redirect_chain:
+        result["redirect_chain"] = redirect_chain
+    return result
+
+
+def fetch_robots(base_url: str, timeout: int = 10, policy=None, max_redirects: int = MAX_ROBOTS_REDIRECTS) -> dict:
     """Fetch robots.txt from an origin and normalize the result."""
     parsed = urlparse(base_url)
     origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else base_url
     robots_url = urljoin(origin.rstrip("/") + "/", "robots.txt")
+    current_url = robots_url
+    redirect_chain = []
+    seen = set()
 
     try:
-        if policy is not None and not policy.admit(robots_url, preflight=True):
-            return {"url": robots_url, "status": "error", "failure_kind": "policy",
-                    "error": "robots preflight blocked by network policy", "allow_all": False,
-                    "document": {"groups": [], "sitemap": [], "rules": []}}
-        response = request_once(robots_url, timeout=timeout)
-        if policy is not None:
-            policy.observe_status(response.status_code)
+        while True:
+            if current_url in seen:
+                return _robots_error(current_url, "redirect", "robots preflight redirect loop", redirect_chain=redirect_chain)
+            seen.add(current_url)
+            if policy is not None and not policy.admit(current_url, preflight=True):
+                return _robots_error(
+                    current_url,
+                    "policy",
+                    "robots preflight blocked by network policy",
+                    redirect_chain=redirect_chain,
+                )
+            response = request_once(current_url, timeout=timeout)
+            if policy is not None:
+                policy.observe_status(response.status_code)
+
+            location = response.headers.get("Location") or response.headers.get("location")
+            if response.status_code not in ROBOTS_REDIRECT_STATUSES or not location:
+                break
+            if len(redirect_chain) >= max_redirects:
+                return _robots_error(
+                    current_url,
+                    "redirect",
+                    f"robots preflight redirect hop limit exceeded ({max_redirects})",
+                    http_status=response.status_code,
+                    redirect_chain=redirect_chain,
+                )
+            destination = urljoin(current_url, location)
+            destination_parsed = urlparse(destination)
+            normalized_path = (destination_parsed.path or "/").rstrip("/") or "/"
+            if (
+                destination_parsed.scheme not in {"http", "https"}
+                or not destination_parsed.netloc
+                or normalized_path != "/robots.txt"
+            ):
+                return _robots_error(
+                    current_url,
+                    "redirect",
+                    f"robots preflight redirected to invalid target: {destination}",
+                    http_status=response.status_code,
+                    redirect_chain=redirect_chain,
+                )
+            policy_origin(destination)
+            redirect_chain.append({"from": current_url, "to": destination, "status": response.status_code})
+            if policy is not None:
+                policy.rebase_origin(destination)
+            current_url = destination
     except (requests.RequestException, ValueError) as exc:
-        return {"url": robots_url, "status": "error", "failure_kind": "transport", "error": str(exc), "allow_all": False, "document": {"groups": [], "sitemap": [], "rules": []}}
+        return _robots_error(current_url, "transport", str(exc), redirect_chain=redirect_chain)
 
     if response.status_code == 404:
-        return {"url": robots_url, "status": "missing", "allow_all": True, "document": {"groups": [], "sitemap": [], "rules": []}}
+        result = {"url": current_url, "status": "missing", "allow_all": True, "document": _empty_document()}
+        if redirect_chain:
+            result["redirect_chain"] = redirect_chain
+        return result
 
     if response.status_code != 200:
-        return {"url": robots_url, "status": "error", "http_status": response.status_code,
-                "failure_kind": "redirect" if 300 <= response.status_code < 400 else "http",
-                "allow_all": False, "document": {"groups": [], "sitemap": [], "rules": []}}
+        return _robots_error(
+            current_url,
+            "redirect" if 300 <= response.status_code < 400 else "http",
+            str(response.status_code),
+            http_status=response.status_code,
+            redirect_chain=redirect_chain,
+        )
 
     text = response.text or ""
     parsed_text = parse_robots(text)
     if parsed_text["status"] == "ok":
-        return {"url": robots_url, "status": "ok", **parsed_text, "allow_all": parsed_text.get("allow_all", False)}
-    return {"url": robots_url, **parsed_text}
+        result = {"url": current_url, "status": "ok", **parsed_text, "allow_all": parsed_text.get("allow_all", False)}
+    else:
+        result = {"url": current_url, **parsed_text}
+    if redirect_chain:
+        result["redirect_chain"] = redirect_chain
+    return result
 
 
 def main() -> int:

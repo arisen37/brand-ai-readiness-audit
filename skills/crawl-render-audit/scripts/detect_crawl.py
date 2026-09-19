@@ -29,7 +29,7 @@ from _util import (
     single,
 )
 
-from lib.common.extract import extract_canonical_url, extract_text, extract_links
+from lib.common.extract import _cached_result, extract_canonical_url, extract_text, extract_links
 from lib.common.robots import robots_allows
 
 CATEGORY = "discoverability"
@@ -52,14 +52,17 @@ _LOCALE_SEGMENT_RE = re.compile(r"^[a-z]{2}(-[A-Z]{2})?$")
 
 
 def _meta_content(html: str, names: List[str]) -> str:
-    from bs4 import BeautifulSoup
+    def build() -> str:
+        from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    for name in names:
-        tag = soup.find("meta", attrs={"name": lambda v, n=name: v and v.lower() == n})
-        if tag and tag.get("content"):
-            return str(tag["content"])
-    return ""
+        soup = BeautifulSoup(html or "", "html.parser")
+        for name in names:
+            tag = soup.find("meta", attrs={"name": lambda v, n=name: v and v.lower() == n})
+            if tag and tag.get("content"):
+                return str(tag["content"])
+        return ""
+
+    return _cached_result("crawl_meta_content", html, tuple(names), build)
 
 
 def _has_noindex(html: str, headers: Dict[str, Any]) -> bool:
@@ -75,18 +78,25 @@ def _has_noindex(html: str, headers: Dict[str, Any]) -> bool:
 
 
 def _extract_hreflang(html: str) -> List[str]:
-    from bs4 import BeautifulSoup
+    def build() -> List[str]:
+        from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    return [
-        str(link.get("hreflang"))
-        for link in soup.find_all("link", rel=lambda v: v and "alternate" in v)
-        if link.get("hreflang")
-    ]
+        soup = BeautifulSoup(html or "", "html.parser")
+        return [
+            str(link.get("hreflang"))
+            for link in soup.find_all("link", rel=lambda v: v and "alternate" in v)
+            if link.get("hreflang")
+        ]
+
+    return _cached_result("crawl_hreflang", html, None, build)
 
 
 def _derive_link_graph(store: Dict[str, Any]) -> Dict[str, set]:
     """target_url -> set of source urls linking to it, same-host only."""
+    recorded = store.get("link_graph")
+    if isinstance(recorded, dict):
+        return {str(target): set(sources or []) for target, sources in recorded.items()}
+
     from lib.common.extract import extract_links
 
     fetches = http_fetches(store)
@@ -113,8 +123,8 @@ def _audited_host(store: Dict[str, Any], fetches: Dict[str, Dict[str, Any]]) -> 
     return ""
 
 
-def _discovered_urls(store: Dict[str, Any]) -> List[str]:
-    urls = set(_derive_link_graph(store).keys())
+def _discovered_urls(store: Dict[str, Any], link_graph: Optional[Dict[str, set]] = None) -> List[str]:
+    urls = set((link_graph if link_graph is not None else _derive_link_graph(store)).keys())
     sitemap = single(store, "SITEMAP")
     if sitemap:
         urls.update(entry["loc"] for entry in sitemap.get("value", {}).get("entries", []))
@@ -130,9 +140,14 @@ def check_d_crawl_01(store: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not robots or robots.get("value", {}).get("status") != "ok":
         return []
 
-    retired = {link['href'] for obs in http_fetches(store).values()
-               for link in extract_links(obs['value'].get('html', ''), obs['source_url'])
-               if re.search(r"\b(?:EOL|end.of.life|unsupported version|retired version)\b", link.get('text', ''), re.I)}
+    retirement_pattern = re.compile(r"\b(?:EOL|end.of.life|unsupported version|retired version)\b", re.I)
+    retired = {
+        link["href"]
+        for obs in http_fetches(store).values()
+        if retirement_pattern.search(obs["value"].get("html", ""))
+        for link in extract_links(obs["value"].get("html", ""), obs["source_url"])
+        if retirement_pattern.search(link.get("text", ""))
+    }
     disallowed = [
         u for u in _discovered_urls(store)
         if u not in retired and not is_utility_path(u) and not robots_allows(
@@ -273,7 +288,11 @@ def check_d_crawl_04(store: Dict[str, Any]) -> List[Dict[str, Any]]:
         if value.get("evidence", {}).get("coverage_gap"):
             continue
         html = value.get("html", "")
-        is_dead = status is None or status >= 400
+        # Authentication, throttling, availability and bot-policy responses
+        # are reachability failures, not evidence that the resource is dead.
+        # Dedicated checks/coverage own those states; counting them here too
+        # produced duplicate "dead" and "bot-hostile" findings for one 403.
+        is_dead = status is None or (status >= 400 and status not in {401, 403, 407, 429, 503})
         is_soft_404 = (
             status == 200
             and len(extract_text(html)) < 400
@@ -778,16 +797,24 @@ def check_d_crawl_14(store: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not budget_exhausted:
         return []
 
-    discovered = [u for u in _discovered_urls(store) if registrable_host(u) == registrable_host(_audited_host(store, http_fetches(store)))]
-    if not discovered:
+    fetches = http_fetches(store)
+    fetched = [
+        url for url in fetches
+        if registrable_host(url) == registrable_host(_audited_host(store, fetches))
+    ]
+    if not fetched:
         return []
 
     findings = []
-    for cluster, urls in group_by_cluster(store, discovered).items():
+    for cluster, urls in group_by_cluster(store, fetched).items():
         with_query = [u for u in urls if urlparse(u).query]
         ratio = len(with_query) / len(urls) if urls else 0
-        if ratio <= 0.4:
+        # A discovered parameter family is not proof it consumed crawl
+        # capacity. Require at least two parameterized pages that were
+        # actually fetched before describing budget as "burned".
+        if len(with_query) < 2 or ratio <= 0.4:
             continue
+        observation_ids = [fetches[url]["id"] for url in with_query]
         findings.append(
             make_finding(
                 check_id="D-CRAWL-14",
@@ -798,9 +825,9 @@ def check_d_crawl_14(store: Dict[str, Any]) -> List[Dict[str, Any]]:
                 mechanism="A crawler with a fixed page budget that spends it on "
                 "filter/sort combinations never reaches the actual content pages.",
                 impact="Substantive pages behind this template may go undiscovered.",
-                observed_signal=f"{ratio:.0%} of discovered URLs in {cluster} carry a query string, and the crawl exhausted its budget",
-                evidence=f"Parameter URLs: {', '.join(sorted(with_query)[:5])}",
-                observation_ids=[],
+                observed_signal=f"{ratio:.0%} of fetched URLs in {cluster} carry a query string, and the crawl exhausted its budget",
+                evidence=f"Fetched parameter URLs: {', '.join(sorted(with_query)[:5])}",
+                observation_ids=observation_ids,
                 source_urls=with_query,
                 affected=affected_block(with_query, total_in_scope=len(urls)),
                 suggested_action={

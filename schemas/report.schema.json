@@ -68,6 +68,35 @@
         "$ref": "#/$defs/proactive_opportunity"
       }
     },
+    "external_verification": {
+      "type": "array",
+      "description": "Agent-inspected independent web sources used for claim or entity verification",
+      "items": {
+        "type": "object",
+        "required": ["type", "query", "sources"],
+        "properties": {
+          "type": {"enum": ["claim", "entity_collision"]},
+          "claim_id": {"type": ["string", "null"]},
+          "claim_text": {"type": ["string", "null"]},
+          "query": {"type": "string"},
+          "searched_at": {"type": ["string", "null"], "format": "date-time"},
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["url", "title", "supporting_text", "assessment", "entity_match"],
+              "properties": {
+                "url": {"type": "string", "format": "uri", "pattern": "^https?://"},
+                "title": {"type": "string"},
+                "supporting_text": {"type": "string"},
+                "assessment": {"type": "string"},
+                "entity_match": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    },
     "demoted": {
       "type": "array"
     },

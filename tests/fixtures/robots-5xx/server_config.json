@@ -1,8 +1,0 @@
-{
-  "overrides": {
-    "/robots.txt": {
-      "status": 500,
-      "body": "internal server error"
-    }
-  }
-}

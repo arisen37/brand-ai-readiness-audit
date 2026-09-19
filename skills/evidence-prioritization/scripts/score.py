@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from _prioritization_util import affected_url_set, confidence_index, finding_url_set, severity_index, SEVERITY_ORDER
@@ -38,6 +39,18 @@ DISTRIBUTION_GUARD_THRESHOLD = 0.3
 # with too few findings there is no pattern to correct, only individual
 # severities that should stand on their own evidence.
 DISTRIBUTION_GUARD_MIN_FINDINGS = 5
+
+# These checks infer a site/entity-wide absence from the collected sample.
+# Unlike a directly observed 404 or noindex, a small or incomplete sample
+# cannot support maximum confidence or an importance boost merely because the
+# homepage happened to be one of the sampled URLs.
+SAMPLE_WIDE_CHECK_IDS = {
+    "D-ENTITY-01",
+    "D-ENTITY-02",
+    "D-ENTITY-05",
+    "D-ENTITY-06",
+    "D-TRUST-06",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +93,7 @@ def _url_identity(url: str) -> str:
 
 
 def _importance_modifier(finding: Dict[str, Any], store: Optional[Dict[str, Any]] = None) -> Tuple[int, Optional[str]]:
-    if not store:
+    if not store or finding.get("check_id") in SAMPLE_WIDE_CHECK_IDS:
         return 0, None
     target = store.get("target", {}) or {}
     requested = target.get("normalized_url") or target.get("requested_url")
@@ -89,6 +102,25 @@ def _importance_modifier(finding: Dict[str, Any], store: Optional[Dict[str, Any]
         urls = affected_url_set(finding)
         if any(_url_identity(str(url)) == requested_id for url in urls):
             return 1, "importance +1: the explicitly requested audit target is affected"
+    return 0, None
+
+
+def _sample_modifier(finding: Dict[str, Any], store: Optional[Dict[str, Any]] = None) -> Tuple[int, Optional[str]]:
+    if not store or finding.get("check_id") not in SAMPLE_WIDE_CHECK_IDS:
+        return 0, None
+    observations = store.get("observations", []) or []
+    page_count = sum(1 for observation in observations if observation.get("type") == "HTTP_FETCH")
+    crawl = (store.get("capabilities", {}) or {}).get("crawl", {}) or {}
+    sitemap_observations = [o for o in observations if o.get("type") == "SITEMAP"]
+    sitemap_complete = any(
+        (o.get("value", {}) or {}).get("status") == "ok"
+        and not (o.get("value", {}) or {}).get("partial")
+        for o in sitemap_observations
+    )
+    if page_count < 5 and not sitemap_complete:
+        return -1, f"sample -1: site-wide inference from {page_count} page(s) without a complete sitemap"
+    if not crawl.get("complete", False):
+        return -1, "sample -1: site-wide inference from an incomplete crawl"
     return 0, None
 
 
@@ -114,6 +146,10 @@ def score_finding(finding: Dict[str, Any], store: Optional[Dict[str, Any]] = Non
             index += delta
             trace.append(note)
     delta, note = _importance_modifier(finding, store)
+    if delta:
+        index += delta
+        trace.append(note)
+    delta, note = _sample_modifier(finding, store)
     if delta:
         index += delta
         trace.append(note)
@@ -192,6 +228,9 @@ def apply_distribution_guard(
 
     if high_critical_ratio(findings) <= threshold:
         return findings, calibration_log
+    driver_counts = Counter(
+        f["check_id"] for f in findings if f["severity"] in ("high", "critical")
+    )
 
     calibration_log.append(
         {
@@ -199,6 +238,7 @@ def apply_distribution_guard(
             "high_critical_ratio": high_critical_ratio(findings),
             "threshold": threshold,
             "finding_count": len(findings),
+            "high_critical_check_counts": dict(sorted(driver_counts.items())),
         }
     )
 
@@ -265,6 +305,16 @@ def prioritize_findings(pooled_findings: List[Any], store: Optional[Dict[str, An
     findings alone."""
     normalized, rejected = normalize_findings(pooled_findings)
     deduped, merge_log = merge_duplicate_findings(normalized)
+    if store:
+        page_count = sum(1 for observation in (store.get("observations", []) or []) if observation.get("type") == "HTTP_FETCH")
+        crawl_complete = bool(((store.get("capabilities", {}) or {}).get("crawl", {}) or {}).get("complete"))
+        for finding in deduped:
+            if finding.get("check_id") in SAMPLE_WIDE_CHECK_IDS and (page_count < 5 or not crawl_complete):
+                if finding.get("confidence") == "high":
+                    finding["confidence"] = "medium"
+                    finding["_normalization_notes"] = finding.get("_normalization_notes", []) + [
+                        "confidence -1 tier: site-wide inference from a small or incomplete crawl"
+                    ]
     scored = [score_finding(f, store) for f in deduped]
     kept, demoted = demote_low_confidence(scored)
     kept, calibration_log = apply_distribution_guard(kept)

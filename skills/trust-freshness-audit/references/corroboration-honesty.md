@@ -5,8 +5,9 @@ unfalsifiable finding is to assert that a claim is uncorroborated without having
 
 1. The corroboration finding class (D-TRUST-05) and the collision half of D-ENTITY-03
    may only be emitted when a corroboration record exists in the store.
-2. A corroboration record contains: query string, method, timestamp, result count,
-   result URLs. No record, no finding.
+2. A corroboration record contains a query, method, timestamp, and inspected source
+   URLs with short supporting passages, entity-match decisions, and claim
+   assessments. No record, no finding.
 3. Absent a record the state is neither pass nor fail. It is X-COV-01 with reason
    SEARCH_UNAVAILABLE.
 4. Report language must distinguish "no independent source was found" from
@@ -21,15 +22,17 @@ unfalsifiable finding is to assert that a claim is uncorroborated without having
    every source has `entity_match: false` is reported as an **identity-confusion**
    finding, not silently folded into "nothing was found" — those are different
    facts about the world and the report must say which one occurred.
-7. `scripts/corroborate.py` never fetches the live web itself inside this
-   implementation. It is a capability-detected recorder: given search results
-   (already obtained by an authorized caller, or injected for testing), it
+   Even a confirmed-same-entity mention is not support unless its assessment is
+   `supports`; `contradicts` becomes a cited contradiction finding.
+7. `scripts/corroborate.py` never fetches the live web itself. It is a recorder:
+   given search results (obtained and page-inspected by the invoking agent,
+   another authorized caller, or injected for testing), it
    builds the `CLAIM_CORROBORATION` observation and runs the `entity_match`
    check deterministically. With no results supplied, it returns an honest
    `performed: false` record — the same graceful-degradation pattern
    `lib/site_observer/render.py` uses for an absent headless-browser capability.
    This keeps the corroboration record itself reproducible and testable even
-   though the underlying web search is not.
+   independently of the underlying web search.
 8. Naming the entity is not enough to confirm a source is about it. A source
    whose text also disambiguates itself from the entity ("not affiliated
    with", "no relation to", "not to be confused with", ...) is never scored
@@ -38,8 +41,8 @@ unfalsifiable finding is to assert that a claim is uncorroborated without having
    specifically because a hostile review found a disclaimer *warning about* a
    name collision being scored as *confirming* corroboration, which inverts
    this rule's entire purpose.
-9. The 45-second corroboration allocation in the [orchestration rules](../../audit-orchestrator/references/orchestration-rules.md)
-   is a future integration allowance, not a wired search capability. Only
+9. The three-request corroboration limit in the [orchestration rules](../../audit-orchestrator/references/orchestration-rules.md)
+   is enforced by the orchestrator's agent-search handoff. Only
    `entity_fact` claims and unattributed `superlative_stat`
    claims are things D-TRUST-05 can act on at all.
    `_trust_util.is_corroboration_worthy()` is the selection rule, and

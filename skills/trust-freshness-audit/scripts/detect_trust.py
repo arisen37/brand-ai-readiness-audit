@@ -241,38 +241,80 @@ def check_d_trust_05(store: Dict[str, Any], claim_table: Dict[str, Any]) -> List
 
         sources = value.get("sources", [])
         matched = [s for s in sources if s.get("entity_match")]
-        if matched:
+        supporting = [
+            source for source in matched
+            if (source.get("assessment") or source.get("relation") or "supports") == "supports"
+        ]
+        contradicting = [
+            source for source in matched
+            if (source.get("assessment") or source.get("relation")) == "contradicts"
+        ]
+        if supporting:
             continue
 
         identity_confusion = bool(sources) and not matched
+        contradiction = bool(contradicting)
         observed_signal = (
+            f"{len(contradicting)} confirmed-same-entity source(s) contradict the claim"
+            if contradiction else
             f"{len(sources)} source(s) found, all about a different/unconfirmed entity"
             if identity_confusion
-            else "0 independent sources found"
+            else f"{len(matched)} confirmed-same-entity source(s) mention the topic but do not support the claim"
+            if matched
+            else "0 inspected independent source pages support the claim"
         )
+
+        if contradiction:
+            title = "Independent source contradicts the site's claim"
+            severity = "high"
+            mechanism = (
+                "A confirmed source about the same entity states conflicting information, "
+                "so a citation system has no reliable value to repeat."
+            )
+            action_summary = "Reconcile the site claim with the cited independent evidence."
+            how_to_fix = "Correct the claim or add its date, scope, and source so the apparent conflict is resolved."
+            validation = "Re-run verification; no confirmed source contradicts the revised claim."
+        else:
+            title = (
+                "Apparent corroboration is about a different entity"
+                if identity_confusion else
+                "No inspected independent source supports the claim"
+            )
+            severity = "medium"
+            mechanism = (
+                "A claim repeated only by its own source is weaker evidence than one corroborated independently; a source that is "
+                "actually about a different, similarly named entity is worse than no corroboration at all."
+            )
+            action_summary = "Build an external presence that states this fact independently and unambiguously about this entity."
+            how_to_fix = "Pursue a press mention, directory listing, or review platform entry for this claim."
+            validation = "Re-run corroboration; >=1 source now exists with entity_match true and assessment supports."
 
         findings.append(
             make_finding(
                 check_id="D-TRUST-05",
                 category=CATEGORY,
-                title="Claim exists only on the entity's own site" if not identity_confusion else "Apparent corroboration is about a different entity",
-                severity="medium",
+                title=title,
+                severity=severity,
                 confidence="high",
-                mechanism="A claim repeated only by its own source is weaker "
-                "evidence than one corroborated independently; a source that is "
-                "actually about a different, similarly named entity is worse "
-                "than no corroboration at all.",
+                mechanism=mechanism,
                 impact="This claim cannot be verified against an independent, confirmed-same-entity source.",
                 observed_signal=observed_signal,
-                evidence=f"Query: {value.get('query')}; sources: {', '.join(s.get('url', '') for s in sources[:5]) or 'none'}",
+                evidence=(
+                    f"Query: {value.get('query')}; sources: "
+                    + "; ".join(
+                        f"{source.get('url', '')} — {source.get('supporting_text') or source.get('snippet', '')}"
+                        for source in sources[:5]
+                    )
+                    if sources else f"Query: {value.get('query')}; sources: none"
+                ),
                 observation_ids=[corroboration["id"]],
-                source_urls=[claim["source_url"]],
+                source_urls=[claim["source_url"]] + [source.get("url", "") for source in sources if source.get("url")],
                 affected=affected_block([claim["source_url"]]),
                 suggested_action={
-                    "summary": "Build an external presence that states this fact independently and unambiguously about this entity.",
-                    "priority": "medium",
-                    "how_to_fix": "Pursue a press mention, directory listing, or review platform entry for this claim.",
-                    "validation": "Re-run corroboration; >=1 source now exists with entity_match true.",
+                    "summary": action_summary,
+                    "priority": severity,
+                    "how_to_fix": how_to_fix,
+                    "validation": validation,
                 },
             )
         )

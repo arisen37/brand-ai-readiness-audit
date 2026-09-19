@@ -19,7 +19,10 @@ from typing import Any, Dict, Optional
 
 # orchestration-rules.md's published budget table.
 DEFAULT_BUDGET: Dict[str, Any] = {
-    "total_s": 270,
+    # Keep a 30-second margin below the CLI worker's 280-second hard stop so
+    # exhausted collection/detector work can still be composed, validated,
+    # serialized, and written as an honest partial report.
+    "total_s": 250,
     "robots_preflight_s": 10,
     "raw_crawl_s": 90,
     "raw_crawl_max_pages": 30,
@@ -29,6 +32,7 @@ DEFAULT_BUDGET: Dict[str, Any] = {
     "render_sample_s": 90,
     "render_sample_max_pages": 8,
     "corroboration_s": 45,
+    "corroboration_max_queries": 3,
     "detectors_scoring_s": 60,
     "report_validation_s": 15,
     "model_calls_max": 14,
@@ -48,6 +52,7 @@ class Budget:
         self.requests_made = 0
         self.render_pages_done = 0
         self.model_calls_made = 0
+        self.search_queries_made = 0
 
     # -- stage timing ---------------------------------------------------
 
@@ -96,6 +101,12 @@ class Budget:
     def record_model_call(self) -> None:
         self.model_calls_made += 1
 
+    def can_search(self) -> bool:
+        return self.search_queries_made < self.config["corroboration_max_queries"]
+
+    def record_search(self) -> None:
+        self.search_queries_made += 1
+
     # -- politeness --------------------------------------------------------
 
     def polite_delay_s(self) -> float:
@@ -109,6 +120,12 @@ class Budget:
             "render_pages_done": self.render_pages_done,
             "model_calls_made": self.model_calls_made,
             "model_calls_max": self.config["model_calls_max"],
+            "search_queries_made": self.search_queries_made,
+            "search_queries_max": self.config["corroboration_max_queries"],
+            "stage_elapsed_s": {
+                name: round(self.stage_elapsed_s(name), 3)
+                for name in sorted(self._stage_started_at)
+            },
         }
 
 

@@ -1,17 +1,17 @@
 # Observation store contract (trust-freshness-audit)
 
 This skill consumes collected HTTP/render and optional corroboration observations.
-It does not fetch or search. The optional offline recorder can use a supplied
-entity_profile for source disambiguation; the detector itself reads the recorded
-entity_match values, not that profile. The current orchestrator does not obtain
-external search results. See [corroboration honesty](corroboration-honesty.md).
+It does not fetch or search. The offline recorder can use a supplied entity profile
+for source disambiguation; the detector itself reads the recorded entity-match and
+assessment values. The orchestrator imports results supplied through its invoking-agent
+web-search handoff. See [corroboration honesty](corroboration-honesty.md).
 
 | Type | Cardinality | `value` shape (fields this skill reads) |
 |---|---|---|
 | `HTTP_FETCH` | one per crawled URL | `{status_code, final_url, headers, html}` — `lib.common.http_client.fetch_url()`'s shape. |
 | `RENDER` | zero or one per sampled URL | `{status, status_code, html}` — preferred when status is ok, HTTP status is 2xx and HTML is nonempty. Otherwise use valid 2xx raw HTML; failed-page HTML is not site-content evidence. Shared selection is implemented by [pages.py](../../../lib/common/pages.py). |
 | `PAGE_CLASSIFICATION` | zero or one per URL | `{page_type}` — used only to scope D-TRUST-06's named-author check to substantive content (`article`), never to gate the other checks. |
-| `CLAIM_CORROBORATION` | zero or one per claim | `{claim_id, performed: bool, query, method, timestamp, sources: [{url, title, snippet, entity_match: bool}]}`. New in this skill, distinct from `entity-semantic-audit`'s `CORROBORATION` type (that one records an entity-*name* collision lookup; this one records a lookup for one specific *claim*). Absent or `performed: false` means D-TRUST-05 does not fire — never a fabricated "no corroboration found" (`corroboration-honesty.md`). Each source's own `entity_match` records whether it was confirmed to be about *this* entity and not a similarly-named one — see D-TRUST-05's identity-confusion guard. |
+| `CLAIM_CORROBORATION` | zero or one per claim | `{claim_id, claim_text, performed: bool, query, method, timestamp, sources: [{url, title, supporting_text, assessment, entity_match: bool, entity_evidence}]}`. This is distinct from `entity-semantic-audit`'s entity-name collision record. Absent or `performed: false` means D-TRUST-05 does not fire. `entity_match` disambiguates names; `assessment` states whether the inspected page supports, contradicts, merely mentions, or is unrelated to the claim. |
 
 Archetype gating reads the store's top-level `archetype` field
 (`schemas/observation.schema.json`), set once by `lib/site_observer/classify.py`.

@@ -176,10 +176,10 @@ what "seems true" or "is probably fine."
 - **Validation:** re-fetch; the claim now carries a nearby citation or has
   been rephrased.
 
-## D-TRUST-05 — uncorroborated claim, with an identity-confusion guard
-- **Meaning:** a claim exists only on the entity's own site, with no
-  independent, verified-same-entity source found elsewhere — *and that absence
-  was actually checked*, never assumed.
+## D-TRUST-05 — externally unsupported or contradicted claim, with an identity-confusion guard
+- **Meaning:** inspected independent evidence did not support a selected claim,
+  or directly contradicted it — *and that result was actually checked*, never
+  assumed from missing search capability.
 - **Mechanism:** Appendix B/D. A claim repeated only by its own source is
   weaker evidence than one corroborated independently; conversely, a
   "corroborating" source that is actually about a *different, similarly named*
@@ -190,16 +190,16 @@ what "seems true" or "is probably fine."
   all** — never inferred, never treated as "no corroboration exists"
   (`corroboration-honesty.md`, hard rule).
 - **Observable signals:** the corroboration record's `sources` list; each
-  source's `entity_match` — whether it was confirmed to describe *this* entity
+  source's `assessment` (`supports`, `contradicts`, `mentions`, or `unrelated`)
+  and `entity_match` — whether it was confirmed to describe *this* entity
   (cross-checked against `entity_profile`'s canonical name, type, and location/
   identity-anchor — the same fields `entity-semantic-audit` builds), not a
   same-named but different one.
-- **Detection test:** fire when `sources` is empty, **or** every source in
-  `sources` has `entity_match: false` — i.e. any apparent corroboration found
-  is actually about a confusable different entity, which this check treats as
-  equivalent to no real corroboration, and reports as such explicitly (the
-  identity-confusion case gets its own `observed_signal` wording, never
-  conflated with "genuinely nothing found").
+- **Detection test:** a confirmed-same-entity source assessed `supports`
+  suppresses the finding. A confirmed-same-entity `contradicts` source fires a
+  high-severity contradiction finding. Otherwise fire the medium unsupported
+  finding, distinguishing empty results, different/unconfirmed entities, and
+  confirmed-same-entity mentions that do not establish the claim.
 - **Evidence required:** the corroboration record's `query`, `method`,
   `timestamp`, and full `sources` list (even the non-matching ones, so the
   identity-confusion case is auditable).
@@ -213,24 +213,26 @@ what "seems true" or "is probably fine."
   without this guard, a disclaimer *warning about* a name collision was being
   scored as *confirming* corroboration, exactly inverting this check's
   purpose (`_trust_util.source_matches_entity`'s `_DISAMBIGUATION_RE` guard).
-  Corroboration lookups themselves are also scoped: only `entity_fact` claims
+  A bare mention never counts as support. Corroboration requests themselves are
+  also scoped: only `entity_fact` claims
   and unattributed `superlative_stat` claims are ever worth checking
   externally (`_trust_util.is_corroboration_worthy`) — a `time_sensitive` or
   `dated_offer`/`dated_event` claim needs a date, not a second opinion, and
   spending the shared corroboration budget on one is a wasted, unnecessary
   lookup.
-- **False-negative risks:** entirely dependent on the corroboration lookup
-  having run at all, which requires an outbound search capability
-  (`PROJECT_CONTEXT.md` OQ-3, still open) — a permanent, honestly-declared
-  coverage gap on any run without it, never a silent pass.
-- **Severity:** medium.
-- **Confidence:** high — given the record exists, both trigger conditions are
-  deterministic checks over its contents.
+- **False-negative risks:** entirely dependent on the invoking agent completing
+  the issued search request and inspecting suitable source pages. Unavailable or
+  incomplete agent search is an honestly declared coverage gap, never a silent pass.
+- **Severity:** medium when unsupported or identity-confused; high when an
+  inspected confirmed-same-entity source directly contradicts the claim.
+- **Confidence:** high — given inspected evidence exists, the detector applies
+  deterministic rules to its entity-match and assessment fields.
 - **Recommendation:** for high-visibility claims lacking corroboration, build
   an external presence (press mention, directory listing, review platform)
   that states the same fact independently and unambiguously about this entity.
-- **Validation:** re-run corroboration; `>=1` source now exists with
-  `entity_match: true`.
+- **Validation:** re-run verification; `>=1` source now exists with
+  `entity_match: true` and `assessment: supports`, and no confirmed source
+  contradicts the claim.
 
 ## D-TRUST-06 — organizational opacity
 - **Meaning:** no about page, no contact information, and/or substantive

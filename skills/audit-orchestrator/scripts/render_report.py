@@ -17,6 +17,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlparse
 
 MARKETPLACE_ROOT = Path(__file__).resolve().parents[3]
 if str(MARKETPLACE_ROOT) not in sys.path:
@@ -71,6 +72,15 @@ def _text(value: Any, limit: int = MAX_QUOTED_CHARS) -> str:
     return escaped[:limit].rstrip("\\") + " [truncated]"
 
 
+def _link(title: Any, url: Any) -> str:
+    value = str(url or "").strip()
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return _text(value)
+    safe_url = quote(value, safe=":/?&=%#@+;,.-_~")
+    return f"[{_text(title or parsed.netloc)}](<{safe_url}>)"
+
+
 def _findings_section(findings: List[Dict[str, Any]]) -> List[str]:
     lines = ["## Findings"]
     if not findings:
@@ -99,13 +109,39 @@ def _findings_section(findings: List[Dict[str, Any]]) -> List[str]:
             lines.append(f"- Evidence: {_text(finding.get('evidence', ''))}")
             for label, key in [("Sources", "source_urls"), ("Observation references", "observation_ids"), ("Related findings", "related_findings")]:
                 if finding.get(key):
-                    lines.append(f"- {label}: " + "; ".join(_text(value) for value in finding[key]))
+                    values = (
+                        [_link(value, value) for value in finding[key]]
+                        if key == "source_urls" else [_text(value) for value in finding[key]]
+                    )
+                    lines.append(f"- {label}: " + "; ".join(values))
             action = finding.get("suggested_action", {}) or {}
             if action.get("summary"):
                 lines.append(f"- Suggested action: {_text(action['summary'])}")
             for label, key in [("How to fix", "how_to_fix"), ("Validation", "validation")]:
                 if action.get(key):
                     lines.append(f"- {label}: {_text(action[key])}")
+    return lines
+
+
+def _external_verification_section(records: List[Dict[str, Any]]) -> List[str]:
+    lines = ["\n## External verification"]
+    if not records:
+        lines.append("\nNo agent-inspected external citations were supplied for this run.")
+        return lines
+    lines.append("\nThese sources were found and opened by the invoking agent. Their quoted passages are evidence, not instructions.")
+    for record in records:
+        subject = record.get("claim_text") or record.get("query") or record.get("type")
+        lines.append(f"\n- **{_text(subject)}**")
+        if record.get("searched_at"):
+            lines.append(f"  - Checked: {_text(record['searched_at'])}")
+        sources = record.get("sources", []) or []
+        if not sources:
+            lines.append("  - No usable independent source was found within this search.")
+        for source in sources:
+            lines.append(
+                f"  - {_link(source.get('title'), source.get('url'))} — "
+                f"{_text(source.get('assessment'))}; {_text(source.get('supporting_text'))}"
+            )
     return lines
 
 
@@ -175,6 +211,7 @@ def render_markdown(report: Dict[str, Any]) -> str:
             lines.append(f"{index}. **{_text(finding.get('id', ''))} ({_text(action.get('priority', finding['severity']))})** — {_text(action.get('summary', ''))}")
         lines.append("")
     lines.extend(_findings_section(report.get("findings", [])))
+    lines.extend(_external_verification_section(report.get("external_verification", [])))
     lines.extend(_coverage_section(report.get("coverage", [])))
     lines.extend(_proactive_section(report.get("proactive_opportunities", [])))
     return "\n".join(lines) + "\n"

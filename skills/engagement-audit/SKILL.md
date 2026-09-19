@@ -84,18 +84,8 @@ taxonomy for exactly this reason. See [references/fp-guardrails.md](references/f
 
 - [../../lib/](../../lib/) — shared instrumentation, including the common finding
   contract ([../../lib/common/findings.py](../../lib/common/findings.py)). This skill reads the observation store; it
-  never fetches. See [project context](../../PROJECT_CONTEXT.md) decision D-6.
+  never fetches. See the package's single-collection contract.
 - [../../references/failure-taxonomy.md](../../references/failure-taxonomy.md) — check ID registry
 - [../../references/archetype-applicability.md](../../references/archetype-applicability.md) — check gating by site archetype
-
-## Tests
-
-[../../tests/test_engagement_audit.py](../../tests/test_engagement_audit.py) — unit tests per check
-covering both good and bad engagement patterns, edge cases (flat sites, terminal
-pages, missing renders), and regression tests. No network. Run from the
-marketplace root: `python -m pytest tests/test_engagement_audit.py`.
-
-Probe numbering, when supplied observations need interpretation:
-[canonical questions](../entity-semantic-audit/references/probe-questions.md).
 
 Shared output semantics: [finding contract](../../references/finding-contract.md).

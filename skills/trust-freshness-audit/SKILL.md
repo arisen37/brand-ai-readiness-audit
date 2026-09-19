@@ -2,7 +2,7 @@
 name: trust-freshness-audit
 description: Detects credibility and freshness failures that make AI systems reluctant to repeat a claim. Checks whether time-sensitive claims carry visible or machine-readable dates, whether dated signals have gone stale, whether pages contradict each other on founding year or employee/customer counts, whether falsifiable claims carry attribution, whether organizational and authorship information exists, and whether a claim is corroborated anywhere beyond the site itself. Never reports corroboration status that was not actually verified. Use as part of a website AI-readiness audit.
 license: MIT
-allowed-tools: Bash Read
+allowed-tools: Bash Read WebSearch WebFetch
 ---
 
 # Trust / Freshness Audit
@@ -22,9 +22,10 @@ repeat stages already run by the orchestrator. Local `--out` files may be overwr
 
 ## Inputs
 
-Observation store and optional claim table. The offline corroboration recorder
-also accepts supplied search results and an optional entity profile for its identity
-confusion guard. No outbound search is integrated. Exact observation shapes: [references/store-contract.md](references/store-contract.md).
+Observation store and optional claim table. The corroboration recorder accepts
+supplied search results and an optional entity profile for its identity-confusion
+guard. The orchestrator imports results gathered by the invoking agent; this detector
+never performs outbound requests itself. Exact observation shapes: [references/store-contract.md](references/store-contract.md).
 
 ## Scripts
 
@@ -53,9 +54,9 @@ is omitted, `detect_trust.py` builds one itself from `--store`.
 1. Build the claim table: claim text, page, claim type, date signal, attribution.
 2. Run [references/trust-checks.md](references/trust-checks.md) in ID order, applicability precondition first.
 3. Follow [references/corroboration-honesty.md](references/corroboration-honesty.md) only for genuine, already-obtained
-   results. The recorder never searches: use `--timestamp` with the actual lookup time
-   and optional `--method`. Omitted results mean not performed; `[]` means performed
-   with no results. Never invent lookup evidence or run a new search to fill a gap.
+   results. The recorder never searches: the invoking agent supplies inspected results
+   through the orchestrator handoff. Omitted results mean not performed; `[]` means a
+   performed search found no results. Never invent lookup evidence.
 
 ## Evidence rules — hard constraint
 
@@ -64,10 +65,10 @@ real timestamp, query and method exists in the store. Absent that record the che
 neither passed nor failed: it is logged as coverage gap X-COV-01.
 See [references/corroboration-honesty.md](references/corroboration-honesty.md).
 
-> **Capability note.** D-TRUST-05 (claim corroborated only on the entity's own site) needs
-> an outbound corroboration search, which is not wired into this environment. It is
-> reported as an `UNAVAILABLE_INSTRUMENT` coverage entry rather than evaluated; silence
-> from it is not a pass. The other D-TRUST checks run from the ordinary collection pass.
+> **Capability note.** D-TRUST-05 consumes the invoking agent's cited web-search
+> results. No provider key is required by the marketplace. If agent search is unavailable
+> or incomplete, the affected request is coverage, never a silent pass. Selection is
+> limited to eligible claims and the shared three-request budget.
 
 ## Outputs
 
@@ -89,16 +90,8 @@ subjective read on whether a claim "seems" current or trustworthy
 
 - [../../lib/](../../lib/) — shared instrumentation, including the common finding
   contract ([../../lib/common/findings.py](../../lib/common/findings.py)). This skill reads the observation store; it
-  never fetches the target site. See [project context](../../PROJECT_CONTEXT.md) decision D-6.
+  never fetches the target site. See the package's single-collection contract.
 - [../../references/failure-taxonomy.md](../../references/failure-taxonomy.md) — check ID registry
 - [../../references/archetype-applicability.md](../../references/archetype-applicability.md) — check gating by site archetype
-
-## Tests
-
-[../../tests/test_trust_freshness_audit.py](../../tests/test_trust_freshness_audit.py) — unit tests per check,
-an integration test running `build_claim_table.py` -> `detect_trust.py`
-end-to-end, and regression tests (clean site, corroboration honesty, identity
-confusion). No network. Run from the marketplace root:
-`python -m pytest tests/test_trust_freshness_audit.py`.
 
 Shared output semantics: [finding contract](../../references/finding-contract.md).

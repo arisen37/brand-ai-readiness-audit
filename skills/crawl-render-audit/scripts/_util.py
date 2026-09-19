@@ -13,7 +13,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 MARKETPLACE_ROOT = SCRIPTS_DIR.parents[2]
@@ -31,6 +31,11 @@ SHORT_PAGE_TEXT_FLOOR = 400
 _UTILITY_SEGMENT_RE = re.compile(
     r"^(cart|checkout|search|login|logout|signin|signup|register|account|"
     r"wishlist|admin|basket|my-account)(/|$)",
+    re.IGNORECASE,
+)
+_SYSTEM_NAMESPACE_RE = re.compile(
+    r"^(special|system|internal|admin|account|user|talk|template|mediawiki|"
+    r"file|media|category|help|portal|project|wikipedia)(?:[_ ]talk)?:",
     re.IGNORECASE,
 )
 
@@ -51,9 +56,14 @@ def is_utility_path(url: str) -> bool:
     carrying a query string -- disallowing or excluding these is correct practice,
     never a discoverability defect (see fp-guardrails.md)."""
     parsed = urlparse(url)
-    path = parsed.path.lstrip("/")
-    return any(_UTILITY_SEGMENT_RE.fullmatch(re.sub(r"\.(?:html?|php|aspx?)$", "", segment, flags=re.I))
-               for segment in path.split('/'))
+    if parsed.query:
+        return True
+    path = unquote(parsed.path).lstrip("/")
+    return any(
+        _UTILITY_SEGMENT_RE.fullmatch(re.sub(r"\.(?:html?|php|aspx?)$", "", segment, flags=re.I))
+        or _SYSTEM_NAMESPACE_RE.match(segment)
+        for segment in path.split('/')
+    )
 
 
 def registrable_host(value: str) -> str:

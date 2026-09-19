@@ -26,6 +26,7 @@ from _util import (
 )
 
 from lib.common.extract import (
+    _cached_result,
     extract_jsonld,
     extract_links,
     extract_metadata,
@@ -64,10 +65,13 @@ def _relevant_factual_questions(probe: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _has_missing_alt_image(html: str) -> bool:
-    from bs4 import BeautifulSoup
+    def build() -> bool:
+        from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    return any(not (img.get("alt") or "").strip() for img in soup.find_all("img"))
+        soup = BeautifulSoup(html or "", "html.parser")
+        return any(not (img.get("alt") or "").strip() for img in soup.find_all("img"))
+
+    return _cached_result("extract_missing_alt", html, None, build)
 
 
 def _has_bare_pdf_link(html: str, base_url: str) -> bool:
@@ -256,24 +260,27 @@ def check_d_extract_03(store: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _jsonld_blocks(html: str):
-    from bs4 import BeautifulSoup
+    def build():
+        from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    blocks = []
-    for script in soup.find_all("script"):
-        if not is_jsonld_mime_type(script.get("type")):
-            continue
-        content = script.get_text(strip=True)
-        if not content:
-            continue
-        try:
-            parsed = json.loads(content)
-        except (json.JSONDecodeError, RecursionError) as exc:
-            blocks.append({"error": str(exc), "raw": content})
-            continue
-        for item in flatten_jsonld(parsed):
-            blocks.append({"parsed": item})
-    return blocks
+        soup = BeautifulSoup(html or "", "html.parser")
+        blocks = []
+        for script in soup.find_all("script"):
+            if not is_jsonld_mime_type(script.get("type")):
+                continue
+            content = script.get_text(strip=True)
+            if not content:
+                continue
+            try:
+                parsed = json.loads(content)
+            except (json.JSONDecodeError, RecursionError) as exc:
+                blocks.append({"error": str(exc), "raw": content})
+                continue
+            for item in flatten_jsonld(parsed):
+                blocks.append({"parsed": item})
+        return blocks
+
+    return _cached_result("extract_jsonld_blocks", html, None, build)
 
 
 def _get_path_values(obj: Any, dotted: str) -> List[Any]:
@@ -384,20 +391,23 @@ def check_d_extract_04(store: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _heading_outline(html: str):
-    from bs4 import BeautifulSoup
+    def build():
+        from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    headings = soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
-    outline = []
-    for i, heading in enumerate(headings):
-        text_after = []
-        for sibling in heading.find_all_next():
-            if sibling in headings:
-                break
-            if sibling.name and sibling.get_text(strip=True):
-                text_after.append(sibling.get_text(strip=True))
-        outline.append({"level": heading.name, "has_body": bool(text_after)})
-    return outline
+        soup = BeautifulSoup(html or "", "html.parser")
+        heading_names = {"h1", "h2", "h3", "h4", "h5", "h6"}
+        content_names = heading_names | {"p", "li", "pre", "blockquote", "table"}
+        outline = []
+        current = None
+        for element in soup.find_all(list(content_names)):
+            if element.name in heading_names:
+                current = {"level": element.name, "has_body": False}
+                outline.append(current)
+            elif current is not None and element.get_text(strip=True):
+                current["has_body"] = True
+        return outline
+
+    return _cached_result("extract_heading_outline", html, None, build)
 
 
 def check_d_extract_05(store: Dict[str, Any]) -> List[Dict[str, Any]]:

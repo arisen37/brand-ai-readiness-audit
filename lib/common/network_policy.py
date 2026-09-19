@@ -6,6 +6,7 @@ The transport additionally pins sockets to validated public addresses.
 """
 import time
 import re
+import threading
 from urllib.parse import urlsplit, unquote, parse_qsl
 
 
@@ -90,41 +91,49 @@ class RequestPolicy:
         self.blocked = []
         self.stopped = False
         self.time_left = lambda: float("inf")
+        self._lock = threading.Lock()
+
+    def rebase_origin(self, url):
+        with self._lock:
+            self.origin = origin(url)
 
     def admit(self, url, method="GET", *, preflight=False):
         from .robots import robots_allows_every_interpretation
-        reason = None
-        try:
-            if method not in {"GET", "HEAD"}:
-                reason = "unsafe_method"
-            elif origin(url) != self.origin:
-                reason = "cross_origin"
-            elif unsafe_target(url):
-                reason = "unsafe_or_authenticated_target"
-            elif preflight and (urlsplit(url).path != "/robots.txt" or urlsplit(url).query):
-                reason = "invalid_robots_preflight"
-            elif self.stopped or self.requests >= self.max_requests:
-                reason = "request_budget_or_backoff"
-            elif not preflight:
-                parsed = urlsplit(url)
-                target = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
-                if self.robots is None or not robots_allows_every_interpretation(self.robots, target):
-                    reason = "robots_disallowed_or_unknown"
-        except ValueError:
-            reason = "invalid_or_credentialed_url"
-        wait = 0 if self.last_request is None else max(0, self.delay - (self.clock() - self.last_request))
-        if not reason and wait >= self.time_left():
-            reason = "stage_time_budget"
-        if reason:
-            self.blocked.append({"url": url, "reason": reason})
-            return False
-        if self.last_request is not None:
-            self.sleep(wait)
-        self.last_request = self.clock()
-        self.requests += 1
-        return True
+
+        with self._lock:
+            reason = None
+            try:
+                if method not in {"GET", "HEAD"}:
+                    reason = "unsafe_method"
+                elif origin(url) != self.origin:
+                    reason = "cross_origin"
+                elif unsafe_target(url):
+                    reason = "unsafe_or_authenticated_target"
+                elif preflight and ((urlsplit(url).path or "/").rstrip("/") or "/") != "/robots.txt":
+                    reason = "invalid_robots_preflight"
+                elif self.stopped or self.requests >= self.max_requests:
+                    reason = "request_budget_or_backoff"
+                elif not preflight:
+                    parsed = urlsplit(url)
+                    target = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
+                    if self.robots is None or not robots_allows_every_interpretation(self.robots, target):
+                        reason = "robots_disallowed_or_unknown"
+            except ValueError:
+                reason = "invalid_or_credentialed_url"
+            wait = 0 if self.last_request is None else max(0, self.delay - (self.clock() - self.last_request))
+            if not reason and wait >= self.time_left():
+                reason = "stage_time_budget"
+            if reason:
+                self.blocked.append({"url": url, "reason": reason})
+                return False
+            if self.last_request is not None:
+                self.sleep(wait)
+            self.last_request = self.clock()
+            self.requests += 1
+            return True
 
     def observe_status(self, status):
         # Stop this audit instead of retrying a throttled/unavailable origin.
-        if status in {429, 503}:
-            self.stopped = True
+        with self._lock:
+            if status in {429, 503}:
+                self.stopped = True

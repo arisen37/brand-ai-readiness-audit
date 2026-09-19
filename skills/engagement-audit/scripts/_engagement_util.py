@@ -25,7 +25,7 @@ for _path in (str(SCRIPTS_DIR), str(MARKETPLACE_ROOT)):
 # Shared mechanics, re-exported for the existing detector interfaces.
 from lib.common.observations import http_fetches, iter_type, page_classifications, probes, renders, single
 from lib.common.pages import effective_pages
-from lib.common.extract import title_segments, significant_words, containment_ratio
+from lib.common.extract import _cached_result, title_segments, significant_words, containment_ratio
 from lib.common.extract import url_depth
 
 from lib.common.findings import affected_block, make_finding  # noqa: F401  (re-exported)
@@ -109,8 +109,12 @@ def main_content_soup(html: str):
 
 
 def main_text(html: str) -> str:
-    text = main_content_soup(html).get_text(" ", strip=True)
-    return re.sub(r"\s+", " ", text)
+    return _cached_result(
+        "engagement_main_text",
+        html,
+        None,
+        lambda: re.sub(r"\s+", " ", main_content_soup(html).get_text(" ", strip=True)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,30 +123,28 @@ def main_text(html: str) -> str:
 
 
 def brand_token_positions(html: str, title: str, brand_tokens: List[str], first_screen_chars: int = 800) -> Dict[str, bool]:
-    from bs4 import BeautifulSoup
-
     tokens = [t.lower() for t in brand_tokens if t]
     if not tokens:
         return {"body": False, "logo_alt": False, "title": False}
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    root = soup.body or soup
-    body_text = root.get_text(' ', strip=True)[:first_screen_chars].lower()
-    # Match a named token, not a substring of an unrelated word (AI/training).
-    patterns = [re.compile(r"(?<!\w)" + re.escape(t) + r"(?!\w)", re.IGNORECASE) for t in tokens]
-    body_hit = any(pattern.search(body_text) for pattern in patterns)
+    def build() -> Dict[str, bool]:
+        from bs4 import BeautifulSoup
 
-    logo_hit = False
-    for img in soup.find_all("img"):
-        alt = (img.get("alt") or "").lower()
-        aria = (img.get("aria-label") or "").lower()
-        if any(pattern.search(alt) or pattern.search(aria) for pattern in patterns):
-            logo_hit = True
-            break
+        soup = BeautifulSoup(html or "", "html.parser")
+        root = soup.body or soup
+        body_text = root.get_text(' ', strip=True)[:first_screen_chars].lower()
+        patterns = [re.compile(r"(?<!\w)" + re.escape(t) + r"(?!\w)", re.IGNORECASE) for t in tokens]
+        body_hit = any(pattern.search(body_text) for pattern in patterns)
+        logo_hit = any(
+            pattern.search((img.get("alt") or "").lower())
+            or pattern.search((img.get("aria-label") or "").lower())
+            for img in soup.find_all("img")
+            for pattern in patterns
+        )
+        title_hit = any(any(pattern.search(seg) for pattern in patterns) for seg in title_segments(title))
+        return {"body": body_hit, "logo_alt": logo_hit, "title": title_hit}
 
-    title_hit = any(any(pattern.search(seg) for pattern in patterns) for seg in title_segments(title))
-
-    return {"body": body_hit, "logo_alt": logo_hit, "title": title_hit}
+    return _cached_result("engagement_brand_positions", html, (title, tuple(tokens), first_screen_chars), build)
 
 
 # ---------------------------------------------------------------------------
@@ -154,28 +156,23 @@ _TEXTUAL_PATH_RE = re.compile(r"\b[\w& ]{2,30}\s*(?:>|›|»)\s*[\w& ]{2,30}\b")
 
 
 def has_breadcrumb(html: str) -> bool:
-    from bs4 import BeautifulSoup
+    def build() -> bool:
+        from bs4 import BeautifulSoup
+        from lib.common.extract import extract_jsonld
 
-    from lib.common.extract import extract_jsonld
+        for node in extract_jsonld(html):
+            node_type = node.get("@type")
+            node_types = {node_type} if isinstance(node_type, str) else set(node_type or [])
+            if "BreadcrumbList" in node_types:
+                return True
+        soup = BeautifulSoup(html or "", "html.parser")
+        for tag in soup.find_all(["nav", "ol", "ul", "div"]):
+            values = (" ".join(tag.get("class", []) or []), tag.get("id", "") or "", tag.get("aria-label", "") or "")
+            if any(_BREADCRUMB_NAME_RE.search(value) for value in values):
+                return True
+        return bool(_TEXTUAL_PATH_RE.search(main_text(html)[:600]))
 
-    for node in extract_jsonld(html):
-        node_type = node.get("@type")
-        node_types = {node_type} if isinstance(node_type, str) else set(node_type or [])
-        if "BreadcrumbList" in node_types:
-            return True
-
-    soup = BeautifulSoup(html or "", "html.parser")
-    for tag in soup.find_all(["nav", "ol", "ul", "div"]):
-        classes = " ".join(tag.get("class", []) or [])
-        id_attr = tag.get("id", "") or ""
-        aria = tag.get("aria-label", "") or ""
-        if _BREADCRUMB_NAME_RE.search(classes) or _BREADCRUMB_NAME_RE.search(id_attr) or _BREADCRUMB_NAME_RE.search(aria):
-            return True
-
-    if _TEXTUAL_PATH_RE.search(main_text(html)[:600]):
-        return True
-
-    return False
+    return _cached_result("engagement_breadcrumb", html, None, build)
 
 
 # ---------------------------------------------------------------------------
@@ -203,10 +200,19 @@ def internal_fragment_links(html: str, base_url: str) -> List[Tuple[str, str]]:
 
 
 def has_dom_anchor(html: str, fragment: str) -> bool:
-    from bs4 import BeautifulSoup
+    def build() -> set:
+        from bs4 import BeautifulSoup
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    return soup.find(id=fragment) is not None or soup.find(attrs={"name": fragment}) is not None
+        soup = BeautifulSoup(html or "", "html.parser")
+        return {
+            str(value)
+            for tag in soup.find_all(True)
+            for value in (tag.get("id"), tag.get("name"))
+            if value
+        }
+
+    anchors = _cached_result("engagement_dom_anchors", html, None, build)
+    return fragment in anchors
 
 
 # ---------------------------------------------------------------------------
@@ -367,9 +373,12 @@ _SOCIAL_SHARE_RE = re.compile(r"\b(share|tweet|mailto)\b", re.IGNORECASE)
 def content_area_links(html: str, base_url: str) -> List[Dict[str, Any]]:
     from lib.common.extract import extract_links
 
-    soup = main_content_soup(html)
-    content_html = str(soup)
-    return extract_links(content_html, base_url=base_url)
+    return _cached_result(
+        "engagement_content_links",
+        html,
+        base_url,
+        lambda: extract_links(str(main_content_soup(html)), base_url=base_url),
+    )
 
 
 def _site_host(url: str) -> str:
@@ -417,29 +426,26 @@ def navigation_destinations(html: str, base_url: str) -> List[str]:
     not a continuation path, so those cases return too few destinations to
     suppress anything.
     """
-    from bs4 import BeautifulSoup
+    def build() -> List[str]:
+        from bs4 import BeautifulSoup
+        from lib.common.extract import extract_links
 
-    from lib.common.extract import extract_links
+        soup = BeautifulSoup(html or "", "html.parser")
+        root = soup.body if soup.body is not None else soup
+        regions = list(root.find_all(list(_NAVIGATION_REGIONS)))
+        regions += [tag for tag in root.find_all(attrs={"role": "navigation"}) if tag not in regions]
+        self_path = urlparse(base_url).path or "/"
+        destinations = set()
+        for region in regions:
+            for link in extract_links(str(region), base_url=base_url):
+                if link.get("unsafe_action") or classify_link(link, base_url) != "internal_content":
+                    continue
+                destination = link["href"].split("#")[0]
+                if (urlparse(destination).path or "/") != self_path:
+                    destinations.add(destination)
+        return sorted(destinations)
 
-    soup = BeautifulSoup(html or "", "html.parser")
-    root = soup.body if soup.body is not None else soup
-    regions = list(root.find_all(list(_NAVIGATION_REGIONS)))
-    # The ARIA spelling is equivalent to <nav> and common in generated markup.
-    regions += [tag for tag in root.find_all(attrs={"role": "navigation"}) if tag not in regions]
-
-    self_path = urlparse(base_url).path or "/"
-    destinations = set()
-    for region in regions:
-        for link in extract_links(str(region), base_url=base_url):
-            if link.get("unsafe_action"):
-                continue
-            if classify_link(link, base_url) != "internal_content":
-                continue
-            destination = link["href"].split("#")[0]
-            if (urlparse(destination).path or "/") == self_path:
-                continue
-            destinations.add(destination)
-    return sorted(destinations)
+    return _cached_result("engagement_navigation_destinations", html, base_url, build)
 
 
 def hub_url(url: str) -> Optional[str]:

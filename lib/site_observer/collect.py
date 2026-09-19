@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import datetime
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urlparse
+import copy
+from urllib.parse import urlparse, urlunparse
 
 from lib.common.budget import Budget
 from lib.common.http_client import fetch_url
@@ -24,7 +25,7 @@ from lib.common.observations import make_observation
 from lib.common.robots import fetch_robots, robots_allows_every_interpretation
 from lib.site_observer import classify as classify_mod
 from lib.site_observer import render as render_mod
-from lib.site_observer.crawl import crawl, stratified_sample
+from lib.site_observer.crawl import canonical_resource_url, crawl, stratified_sample
 
 STORE_VERSION = "1.0"
 
@@ -42,6 +43,21 @@ def _origin(normalized_url: str) -> str:
     audited-host record, never as the crawl seed."""
     parsed = urlparse(normalized_url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _rebase_url_to_origin(url: str, origin: str) -> str:
+    parsed_url = urlparse(url)
+    parsed_origin = urlparse(origin)
+    return urlunparse(
+        (
+            parsed_origin.scheme,
+            parsed_origin.netloc,
+            parsed_url.path,
+            "",
+            parsed_url.query,
+            "",
+        )
+    )
 
 
 def _robots_degradation(robots: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -68,6 +84,7 @@ def collect(
     render_capability: Optional[Dict[str, Any]] = None,
     now: Optional[Callable[[], datetime.datetime]] = None,
     sleep: Optional[Callable[[float], None]] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Run exactly one collection pass and return `(store, coverage)`.
 
@@ -80,9 +97,11 @@ def collect(
     budget = budget or Budget()
     now = now or (lambda: datetime.datetime.now(datetime.timezone.utc))
     sleep = sleep or _time_mod.sleep
+    on_progress = on_progress or (lambda _stage: None)
 
     seed_url = _normalize_url(url)
     origin = _origin(seed_url)
+    requested_host = urlparse(origin).netloc
     policy = RequestPolicy(seed_url, sleep=sleep, delay=budget.polite_delay_s())
     live_transport = fetch is None
     fetch = fetch or (lambda target: fetch_url(target, timeout=budget.config["raw_crawl_timeout_s"], policy=policy))
@@ -90,9 +109,15 @@ def collect(
     coverage: List[Dict[str, Any]] = []
     observations: List[Dict[str, Any]] = []
 
+    on_progress("robots_preflight")
     budget.start_stage("robots_preflight")
     policy.time_left = lambda: budget.stage_time_left_s("robots_preflight", "robots_preflight_s")
     robots = robots_fetcher(origin)
+    robots_origin = _origin(robots.get("url", origin))
+    if robots_origin != origin:
+        origin = robots_origin
+        seed_url = _rebase_url_to_origin(seed_url, origin)
+        policy.rebase_origin(origin)
     policy.robots = robots
     groups = robots.get("document", {}).get("groups", [])
     selected = [g for g in groups if g.get("user_agent", "").lower() == "brand-ai-readiness-audit"] or [g for g in groups if g.get("user_agent") == "*"]
@@ -117,6 +142,7 @@ def collect(
             }
         )
     else:
+        on_progress("sitemap_and_raw_crawl")
         budget.start_stage("raw_crawl")
         policy.time_left = lambda: budget.stage_time_left_s("raw_crawl", "raw_crawl_s")
         sitemap = None
@@ -124,8 +150,12 @@ def collect(
             from lib.site_observer.sitemap import discover
             sitemap = discover(origin, robots, fetch, time_left=policy.time_left)
             if sitemap["partial"] or sitemap["status"] == "error":
-                coverage.append({"check_id": "X-COV-01", "status": "partial", "reason": "SITEMAP_UNAVAILABLE",
-                                 "detail": "Sitemap discovery was incomplete; unchecked URLs are unknown.", "scope": "sitemap checks"})
+                limitations = sitemap.get("limitation_reasons", [])
+                reason = "FETCH_FAILED" if "FETCH_FAILED" in limitations else "BUDGET_EXHAUSTED"
+                detail = ", ".join(limitations) if limitations else "unknown sitemap error"
+                coverage.append({"check_id": "X-COV-01", "status": "partial", "reason": reason,
+                                 "detail": f"Sitemap discovery was incomplete ({detail}); unchecked URLs are unknown.",
+                                 "scope": "sitemap discovery only"})
 
         def _on_page_fetched(_url: str, _result: Dict[str, Any]) -> None:
             budget.record_page_fetch()
@@ -138,6 +168,7 @@ def collect(
             time_left=lambda: budget.stage_time_left_s("raw_crawl", "raw_crawl_s"),
             can_fetch_more=budget.can_fetch_page,
             on_page_fetched=_on_page_fetched,
+            max_concurrency=budget.config.get("raw_crawl_concurrency", 1),
             # The shared boundary paces actual requests (including redirects).
             # An additional page-loop sleep wastes time after slow responses.
             polite_delay_s=0,
@@ -150,7 +181,8 @@ def collect(
                 result = pages.get(entry["loc"], {})
                 if result.get("status_code") is not None:
                     entry["status_code"] = result["status_code"]
-            observations.append(make_observation("SITEMAP", origin + "/sitemap.xml", sitemap))
+            sitemap_source = next(iter(sitemap.get("checked_urls", [])), origin + "/sitemap.xml")
+            observations.append(make_observation("SITEMAP", sitemap_source, sitemap))
         clusters = crawl_result["clusters"]
         if crawl_result["skipped_safety"]:
             coverage.append({"check_id": "X-COV-01", "status": "skipped", "reason": "NETWORK_POLICY",
@@ -207,6 +239,7 @@ def collect(
         else {"available": False, "reason": "NO_REACHABLE_PAGES"})
     if degradation is None and pages:
         if render_capability.get("available"):
+            on_progress("render_sample")
             budget.start_stage("render_sample")
             policy.time_left = lambda: budget.stage_time_left_s("render_sample", "render_sample_s")
             eligible = {shape: [url for url in urls if pages[url].get("status_code") is not None
@@ -248,22 +281,31 @@ def collect(
         "collected_at": now().isoformat(),
         "target": {
             "requested_url": url,
-            "requested_host": urlparse(origin).netloc,
+            "normalized_url": canonical_resource_url(seed_url),
+            "requested_host": requested_host,
             "audited_host": audited_host,
             "origin": origin,
         },
         "capabilities": {
             "renderer": render_capability,
-            "corroboration": {"available": False, "reason": "MODEL_UNAVAILABLE"},
+            "corroboration": {"available": False, "reason": "SEARCH_NOT_ATTEMPTED"},
             "crawl": {"budget_exhausted": bool(crawl_result.get("frontier_remaining")),
+                      "telemetry_available": degradation is None,
+                      "frontier_remaining": int(crawl_result.get("frontier_remaining", 0) or 0),
                       "complete": degradation is None and not crawl_result.get("frontier_remaining")
                       and not crawl_result.get("skipped_robots") and not crawl_result.get("skipped_safety")
                       and all(p.get("status_code") is not None for p in pages.values())},
         },
         "archetype": classify_mod.classify_archetype({"observations": observations}),
+        "link_graph": crawl_result.get("link_graph", {}),
+        "template_clusters": [
+            {"cluster_id": shape, "urls": urls}
+            for shape, urls in sorted(clusters.items())
+        ],
         "observations": observations,
     }
 
+    on_progress("classification_and_probe")
     from lib.site_observer import probe as probe_mod
 
     from lib.common.pages import effective_pages
@@ -283,16 +325,6 @@ def collect(
     coverage.append({"check_id": "X-COV-01", "status": "partial", "reason": "PROBE_LIMITED",
                      "detail": "Local probes verify explicit text spans; they cannot prove absent answers or read image-only facts.",
                      "scope": "semantic absence and OCR-dependent extraction checks"})
-    coverage.append(
-            {
-                "check_id": "X-COV-01",
-                "status": "skipped",
-                "reason": "SEARCH_UNAVAILABLE",
-                "detail": "No external search evidence provider configured; corroboration is unknown.",
-                "scope": "D-ENTITY-03 and D-TRUST-05 corroboration checks",
-            }
-    )
-
     if policy.blocked or policy.stopped:
         coverage.append({"check_id": "X-COV-01", "status": "partial", "reason": "NETWORK_POLICY", "detail": f"{len(policy.blocked)} request(s) blocked; origin backoff={policy.stopped}", "scope": "restricted redirects/resources; not proof of a site defect"})
     scope = {
@@ -302,8 +334,16 @@ def collect(
         "template_clusters": len(clusters),
         "disallowed": degradation is not None or not robots_allows_every_interpretation(robots, urlparse(seed_url).path + ("?" + urlparse(seed_url).query if urlparse(seed_url).query else "")),
     }
+    budget_result = {**budget.snapshot(), "network_requests": policy.requests}
+    # Saved evidence must carry everything needed to finalize after an agent
+    # search without touching the audited site a second time.
+    store["audit_context"] = {
+        "coverage": copy.deepcopy(coverage),
+        "budget": copy.deepcopy(budget_result),
+        "scope": copy.deepcopy(scope),
+    }
 
-    return {"store": store, "coverage": coverage, "budget": {**budget.snapshot(), "network_requests": policy.requests}, "scope": scope}
+    return {"store": store, "coverage": coverage, "budget": budget_result, "scope": scope}
 
 
 def main() -> int:
